@@ -1,0 +1,14 @@
+# Секреты и данные — НИКОГДА не коммитим (в чатах личные данные людей)
+.env
+data/
+chroma_db/
+*.session
+*.session-journal
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.python-version
+uv.lock
