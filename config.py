@@ -34,7 +34,7 @@ COLLECTION_NAME = "georgia_chats"
 
 # --- Pipeline parameters ---
 INGEST_LIMIT = 5000          # how many recent messages to fetch per chat
-FILTER_SPAM = True           # drop spam (quick-money / drugs / 18+) before chunking
+FILTER_SPAM = True           # drop spam (money / drugs / ads / pets) before chunking; questions are kept
 CHUNK_MAX_GAP_MINUTES = 10   # if the gap between messages exceeds this, start a new chunk
 CHUNK_MAX_CHARS = 1500       # max chunk size in characters
 CHUNK_MIN_CHARS = 40         # drop chunks shorter than this (low signal)

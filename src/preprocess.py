@@ -9,12 +9,15 @@ Two mechanisms work together:
 2. Reply chains. A reply can arrive much later (even days), so time grouping
    alone would separate it from the message it answers. For any message whose
    parent (`reply_to`) is outside its chunk, we walk the FULL reply chain up to
-   the root and prepend ancestors as quoted context (prefixed with "↪"). For
-   each ancestor we pull not just that one message but its whole time-burst
-   (the little surrounding conversation), since the real answer is often not a
-   formal reply but a neighbouring message. This keeps question and answer
-   together regardless of the time gap. No age limit; chain depth is capped by
-   REPLY_CHAIN_MAX_MSGS and total quoted context by REPLY_CONTEXT_MAX_CHARS.
+   the root and prepend the exact replied-to messages as quoted context
+   (prefixed with "↪"). This keeps question and answer together regardless of
+   the time gap. No age limit; chain depth is capped by REPLY_CHAIN_MAX_MSGS
+   and total quoted context by REPLY_CONTEXT_MAX_CHARS.
+
+   `whole_burst` (default False) can additionally pull the whole time-burst
+   around each replied-to message, but in busy chats that drags in unrelated
+   neighbours (a 10-min window mixes several conversations), so it's off by
+   default.
 
 Run:  uv run python -m src.preprocess
 """
@@ -76,7 +79,7 @@ def ancestor_context(
     *,
     chain_max: int = None,
     context_max_chars: int = None,
-    whole_burst: bool = True,
+    whole_burst: bool = False,
 ) -> list[dict]:
     """Default context strategy: walk reply_to chains upward for messages whose
     parent is outside the current chunk and collect the ancestors as context.
@@ -168,7 +171,7 @@ def chunk_messages(
     max_chars: int = None,
     min_chars: int = None,
     context_max_chars: int = None,
-    whole_burst: bool = True,
+    whole_burst: bool = False,
     chain_max: int = None,
     context_fn=None,
 ) -> list[dict]:

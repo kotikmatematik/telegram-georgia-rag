@@ -14,8 +14,9 @@ Telegram → ingest → preprocess/chunk → embed+index (Chroma) → retrieve �
 ```
 
 - **ingest** — fetch chat history into `data/raw/*.jsonl` (Telethon)
-- **preprocess** — drop spam (quick-money / drugs / 18+), then group messages
-  into dialog chunks `data/chunks/*.jsonl` (time windows + reply chains)
+- **preprocess** — drop spam (money / drugs / ads / pet-rehoming; questions are
+  kept), then group messages into dialog chunks `data/chunks/*.jsonl`
+  (time windows + reply chains)
 - **index** — OpenAI embeddings → local ChromaDB vector store
 - **rag** — retrieve top-k chunks + generate an answer with source links
 - **bot** — Telegram interface (aiogram)
