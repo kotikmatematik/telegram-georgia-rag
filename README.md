@@ -1,48 +1,65 @@
 # telegram-georgia-rag
 
-RAG-ассистент (Telegram-бот), который отвечает на вопросы о жизни в Грузии на
-основе переписок из русскоязычных тематических Telegram-чатов (ИП/бизнес, права,
-аренда, услуги, объявления и т.д.).
+A RAG assistant (Telegram bot) that answers questions about life in Georgia
+based on conversations from Russian-speaking topical Telegram chats (sole
+proprietorship/business, driver's licenses, rent, services, classifieds, etc.).
 
-## Как это работает
+> The bot answers in Russian, because the source chats and target users are
+> Russian-speaking.
+
+## How it works
 
 ```
-Telegram → ingest → preprocess/chunk → embed+index (Chroma) → retrieve → GPT → бот
+Telegram → ingest → preprocess/chunk → embed+index (Chroma) → retrieve → GPT → bot
 ```
 
-- **ingest** — выгрузка истории чатов в `data/raw/*.jsonl` (Telethon)
-- **preprocess** — очистка и сборка сообщений в чанки-диалоги `data/chunks/*.jsonl`
-- **index** — эмбеддинги OpenAI → локальная векторная БД ChromaDB
-- **rag** — поиск top-k чанков + генерация ответа со ссылками на источники
-- **bot** — интерфейс в Telegram (aiogram)
+- **ingest** — fetch chat history into `data/raw/*.jsonl` (Telethon)
+- **preprocess** — clean and group messages into dialog chunks `data/chunks/*.jsonl`
+- **index** — OpenAI embeddings → local ChromaDB vector store
+- **rag** — retrieve top-k chunks + generate an answer with source links
+- **bot** — Telegram interface (aiogram)
 
-## Установка
+## Setup
 
 ```bash
 uv sync
-cp .env.example .env   # затем заполнить ключи
+cp .env.example .env   # then fill in the keys
 ```
 
-Нужно заполнить в `.env`:
-- `OPENAI_API_KEY` — ключ OpenAI
-- `BOT_TOKEN` — токен бота от [@BotFather](https://t.me/BotFather)
-- `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` — с https://my.telegram.org/apps
-- `TELEGRAM_PHONE` — номер аккаунта, состоящего в чатах
+Fill in `.env`:
+- `OPENAI_API_KEY` — OpenAI key
+- `BOT_TOKEN` — bot token from [@BotFather](https://t.me/BotFather)
+- `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` — from https://my.telegram.org/apps
+- `TELEGRAM_PHONE` — phone number of the account that is a member of the chats
 
-Список чатов настраивается в `config.py` (`CHATS`).
+The chat list is configured in `config.py` (`CHATS`).
 
-## Запуск пайплайна
+## Running the pipeline
 
 ```bash
-uv run python -m src.ingest                          # выгрузка истории
-uv run python -m src.preprocess                      # чанкинг
-uv run python -m src.index                           # индексация
-uv run python -m src.retrieve "как открыть ип"       # проверка поиска
-uv run python -m src.rag "какие документы для ип"    # проверка ответа
-uv run python -m src.bot                             # запуск бота
+uv run python -m src.ingest                          # fetch history
+uv run python -m src.preprocess                      # chunking
+uv run python -m src.index                           # indexing
+uv run python -m src.retrieve "как открыть ип"       # test retrieval
+uv run python -m src.rag "какие документы для ип"    # test answer
+uv run python -m src.bot                             # start the bot
 ```
 
-## ⚠️ Приватность
+> The example queries are in Russian on purpose — they must match the
+> Russian-language content of the chats.
 
-Чаты содержат личные данные реальных людей. Каталоги `data/`, `chroma_db/` и
-файл `.env` добавлены в `.gitignore` — **не коммить их** в публичный репозиторий.
+## Exploration notebook
+
+To inspect each pipeline step by hand:
+
+```bash
+uv run jupyter lab
+```
+
+Then open `notebooks/explore.ipynb`.
+
+## ⚠️ Privacy
+
+The chats contain real people's personal data. The `data/`, `chroma_db/`
+directories and the `.env` file are listed in `.gitignore` — **do not commit
+them** to a public repository.

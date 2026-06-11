@@ -1,7 +1,7 @@
-"""Выгрузка истории Telegram-чатов в data/raw/<username>.jsonl через Telethon.
+"""Fetch Telegram chat history into data/raw/<username>.jsonl via Telethon.
 
-Запуск:  uv run python -m src.ingest
-При первом запуске Telethon попросит код подтверждения из Telegram.
+Run:  uv run python -m src.ingest
+On first run Telethon will ask for the confirmation code from Telegram.
 """
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ import config
 
 
 def _msg_to_record(msg, chat) -> dict | None:
-    """Преобразовать сообщение Telethon в плоскую запись. None — если пропускаем."""
+    """Convert a Telethon message into a flat record. None means skip it."""
     text = (msg.message or "").strip()
     if not text:
-        return None  # пропускаем медиа без подписи, сервисные сообщения
+        return None  # skip media without caption and service messages
     sender = None
     if msg.sender is not None:
         sender = getattr(msg.sender, "first_name", None) or getattr(
@@ -48,15 +48,15 @@ async def ingest_chat(client: TelegramClient, chat: dict) -> int:
                 continue
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             count += 1
-    print(f"[ingest] {chat['username']}: сохранено {count} сообщений -> {out_path}")
+    print(f"[ingest] {chat['username']}: saved {count} messages -> {out_path}")
     return count
 
 
 async def main() -> None:
     if not (config.TELEGRAM_API_ID and config.TELEGRAM_API_HASH):
         raise SystemExit(
-            "Не заданы TELEGRAM_API_ID / TELEGRAM_API_HASH в .env "
-            "(получить на https://my.telegram.org/apps)"
+            "TELEGRAM_API_ID / TELEGRAM_API_HASH are not set in .env "
+            "(get them at https://my.telegram.org/apps)"
         )
     client = TelegramClient(
         "georgia_ingest", int(config.TELEGRAM_API_ID), config.TELEGRAM_API_HASH

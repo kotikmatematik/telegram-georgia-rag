@@ -1,6 +1,6 @@
-"""RAG: поиск контекста + генерация ответа на русском со ссылками на источники.
+"""RAG: retrieve context + generate a Russian answer with source links.
 
-Запуск:  uv run python -m src.rag "какие документы нужны для ип"
+Run:  uv run python -m src.rag "какие документы нужны для ип"
 """
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import config
 from src.retrieve import search
 from src.store import openai_client
 
+# Prompt is intentionally in Russian: chats and users are Russian-speaking,
+# so we instruct the model to answer in Russian.
 SYSTEM_PROMPT = (
     "Ты — ассистент по жизни в Грузии. Отвечай на русском, опираясь ТОЛЬКО на "
     "приведённые фрагменты переписок из Telegram-чатов. Если в контексте нет "
@@ -34,6 +36,7 @@ def _build_context(hits: list[dict]) -> str:
 def answer(query: str, k: int = config.TOP_K) -> dict:
     hits = search(query, k=k)
     if not hits:
+        # User-facing message (Russian on purpose)
         return {"answer": "В базе пока нет данных. Запусти индексацию.", "sources": []}
 
     context = _build_context(hits)
@@ -58,7 +61,7 @@ def answer(query: str, k: int = config.TOP_K) -> dict:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        raise SystemExit('Использование: python -m src.rag "ваш вопрос"')
+        raise SystemExit('Usage: python -m src.rag "your question"')
     query = " ".join(sys.argv[1:])
     result = answer(query)
     print(result["answer"])

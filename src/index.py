@@ -1,9 +1,9 @@
-"""Эмбеддинг чанков и загрузка их в Chroma.
+"""Embed chunks and load them into Chroma.
 
-Идемпотентно: id чанка детерминирован (chat:msg_id), повторный запуск
-обновляет записи, а не плодит дубли.
+Idempotent: each chunk id is deterministic (chat:msg_id), so re-running
+updates existing records instead of creating duplicates.
 
-Запуск:  uv run python -m src.index
+Run:  uv run python -m src.index
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def _load_chunks() -> list[dict]:
     for chat in config.CHATS:
         path = config.CHUNKS_DIR / f"{chat['username']}.jsonl"
         if not path.exists():
-            print(f"[index] пропуск {chat['username']}: нет {path}")
+            print(f"[index] skip {chat['username']}: {path} not found")
             continue
         with path.open(encoding="utf-8") as f:
             for line in f:
@@ -31,7 +31,7 @@ def _load_chunks() -> list[dict]:
 def main() -> None:
     chunks = _load_chunks()
     if not chunks:
-        raise SystemExit("Нет чанков. Сначала запусти src.preprocess")
+        raise SystemExit("No chunks found. Run src.preprocess first")
 
     collection = get_collection()
     total = 0
@@ -53,9 +53,9 @@ def main() -> None:
             ],
         )
         total += len(batch)
-        print(f"[index] проиндексировано {total}/{len(chunks)}")
+        print(f"[index] indexed {total}/{len(chunks)}")
 
-    print(f"[index] готово. Записей в коллекции: {collection.count()}")
+    print(f"[index] done. Records in collection: {collection.count()}")
 
 
 if __name__ == "__main__":

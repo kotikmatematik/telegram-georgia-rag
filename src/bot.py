@@ -1,7 +1,7 @@
-"""Telegram-бот: задаёшь вопрос -> бот отвечает по контенту чатов о Грузии.
+"""Telegram bot: ask a question -> the bot answers from the Georgia chats.
 
-Запуск:  uv run python -m src.bot
-Нужен BOT_TOKEN в .env (получить у @BotFather).
+Run:  uv run python -m src.bot
+Requires BOT_TOKEN in .env (get it from @BotFather).
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ async def on_question(message: Message) -> None:
         await message.answer("Напиши, пожалуйста, текстовый вопрос.")
         return
     await message.chat.do("typing")
-    # answer() — синхронный (сетевые вызовы OpenAI), уводим в поток
+    # answer() is synchronous (blocking OpenAI calls), so run it in a thread
     result = await asyncio.to_thread(answer, query)
     text = result["answer"] or "Не удалось сформировать ответ."
     await message.answer(text, disable_web_page_preview=True)
@@ -48,7 +48,7 @@ async def on_question(message: Message) -> None:
 
 async def main() -> None:
     if not config.BOT_TOKEN:
-        raise SystemExit("Не задан BOT_TOKEN в .env (получить у @BotFather)")
+        raise SystemExit("BOT_TOKEN is not set in .env (get it from @BotFather)")
     bot = Bot(config.BOT_TOKEN)
     await dp.start_polling(bot)
 

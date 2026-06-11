@@ -1,4 +1,4 @@
-"""Общие помощники: клиент OpenAI, эмбеддинги, доступ к коллекции Chroma."""
+"""Shared helpers: OpenAI client, embeddings, access to the Chroma collection."""
 from __future__ import annotations
 
 import chromadb
@@ -14,13 +14,13 @@ def openai_client() -> OpenAI:
     global _openai
     if _openai is None:
         if not config.OPENAI_API_KEY:
-            raise SystemExit("Не задан OPENAI_API_KEY в .env")
+            raise SystemExit("OPENAI_API_KEY is not set in .env")
         _openai = OpenAI(api_key=config.OPENAI_API_KEY)
     return _openai
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Эмбеддинги для списка текстов (батчами)."""
+    """Embed a list of texts (in batches)."""
     client = openai_client()
     out: list[list[float]] = []
     for i in range(0, len(texts), config.EMBED_BATCH):

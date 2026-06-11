@@ -1,6 +1,6 @@
-"""Поиск релевантных чанков по запросу (для отладки и переиспользования).
+"""Search for relevant chunks by query (for debugging and reuse).
 
-Запуск:  uv run python -m src.retrieve "как открыть ип в грузии"
+Run:  uv run python -m src.retrieve "как открыть ип в грузии"
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def search(query: str, k: int = config.TOP_K) -> list[dict]:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        raise SystemExit('Использование: python -m src.retrieve "ваш вопрос"')
+        raise SystemExit('Usage: python -m src.retrieve "your question"')
     query = " ".join(sys.argv[1:])
     for i, h in enumerate(search(query), 1):
         m = h["meta"]

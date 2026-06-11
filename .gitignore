@@ -1,4 +1,4 @@
-# Секреты и данные — НИКОГДА не коммитим (в чатах личные данные людей)
+# Secrets and data — NEVER commit (chats contain people's personal data)
 .env
 data/
 chroma_db/
@@ -11,4 +11,4 @@ __pycache__/
 *.pyc
 *.egg-info/
 .python-version
-uv.lock
+# uv.lock is intentionally committed for reproducible installs
