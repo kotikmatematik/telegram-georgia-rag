@@ -34,9 +34,12 @@ COLLECTION_NAME = "georgia_chats"
 
 # --- Pipeline parameters ---
 INGEST_LIMIT = 5000          # how many recent messages to fetch per chat
-CHUNK_TIME_GAP_MIN = 10      # time gap (min) between messages => new chunk
+FILTER_SPAM = True           # drop spam (quick-money / drugs / 18+) before chunking
+CHUNK_MAX_GAP_MINUTES = 10   # if the gap between messages exceeds this, start a new chunk
 CHUNK_MAX_CHARS = 1500       # max chunk size in characters
 CHUNK_MIN_CHARS = 40         # drop chunks shorter than this (low signal)
+REPLY_CHAIN_MAX_MSGS = 50    # follow full reply chains, but stop after this many ancestors (safety ceiling)
+REPLY_CONTEXT_MAX_CHARS = 2000  # cap total quoted reply context per chunk (each ancestor pulls its whole time-burst, bounded here)
 TOP_K = 8                    # how many chunks to feed into the LLM context
 EMBED_BATCH = 100            # batch size for embedding requests
 
