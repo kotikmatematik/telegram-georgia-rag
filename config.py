@@ -43,7 +43,13 @@ EMBED_BATCH = 100            # размер батча при эмбеддинг
 # --- Чаты для прототипа ---
 # username нужен для построения ссылок t.me/<username>/<msg_id>
 CHATS = [
+    {"username": "helpgeorgia", "chat_id": -1001452236047, "title": "Взаимопомощь. Грузия"},
     {"username": "ipgeorgiachat", "chat_id": -1001670908431, "title": "ИП/Бизнес Грузия"},
     # Раскомментируй для 2-го чата на этапе масштабирования:
-    # {"username": "paravaingeorgia", "chat_id": -1001512786455, "title": "Права в Грузии"},
+    # {"username": "paravaingeorgia", "chat_id": -1001512786455, "title": "Получение водительских прав в Грузии"},
+    # {"username": "mygeorgia_chat", "chat_id": -1001486751358, "title": "ГРУЗИЯ ЧАТ"},
+    # {"username": "tbilisi_girl", "chat_id": -1001549075106, "title": "Женский чат Тбилиси"},
+    # {"username": "georgia_it", "chat_id": -1001688709586, "title": "Грузия IT чат"},
+    # {"username": "gruzia_medicina", "chat_id": -1001781403833, "title": "Грузия медицина"},
+    # {"username": "georgia_woman", "chat_id": -1001276829180, "title": "Тбилиси женский чат"},
 ]
