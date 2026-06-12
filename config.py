@@ -11,11 +11,12 @@ load_dotenv()
 # --- Paths ---
 ROOT = Path(__file__).parent
 DATA_DIR = ROOT / "data"
-RAW_DIR = DATA_DIR / "raw"          # raw messages: data/raw/<chat>.jsonl
-CHUNKS_DIR = DATA_DIR / "chunks"    # chunks: data/chunks/<chat>.jsonl
-CHROMA_DIR = ROOT / "chroma_db"     # persistent vector DB
+RAW_DIR = DATA_DIR / "raw"              # raw messages: data/raw/<chat>.jsonl
+CHUNKS_DIR = DATA_DIR / "chunks"        # chunks: data/chunks/<chat>.jsonl
+KNOWLEDGE_DIR = DATA_DIR / "knowledge"  # distilled Q&A: data/knowledge/<chat>.jsonl
+CHROMA_DIR = ROOT / "chroma_db"         # persistent vector DB
 
-for _d in (RAW_DIR, CHUNKS_DIR):
+for _d in (RAW_DIR, CHUNKS_DIR, KNOWLEDGE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # --- Secrets ---
