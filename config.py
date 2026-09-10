@@ -29,6 +29,9 @@ TELEGRAM_PHONE = os.getenv("TELEGRAM_PHONE", "")
 # --- OpenAI models ---
 EMBED_MODEL = "text-embedding-3-small"
 CHAT_MODEL = "gpt-4o-mini"
+# Eval judge: deliberately a stronger, different model than CHAT_MODEL so it
+# doesn't share the distiller's blind spots (src/eval_knowledge.py).
+JUDGE_MODEL = "gpt-4o"
 
 # --- Vector DB ---
 COLLECTION_NAME = "georgia_chats"
