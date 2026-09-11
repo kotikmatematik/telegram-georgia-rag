@@ -35,7 +35,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 JUDGE_WORKERS = 8
 
 import config
-from src.knowledge import _thread_text
+from src.knowledge import _thread_latest_dt, _thread_text
 from src.preprocess import _load_raw
 from src.spam import filter_spam
 from src.store import openai_client
@@ -114,7 +114,13 @@ def _threads_by_root(username: str, *, min_thread_size: int = 2) -> dict[int, li
     msgs = _load_raw(raw_path)
     if config.FILTER_SPAM:
         msgs, _ = filter_spam(msgs)
+    since = config.ingest_since_dt()
     threads = [t for t in build_threads(msgs) if len(t) >= min_thread_size]
+    if since is not None:
+        threads = [
+            t for t in threads
+            if (d := _thread_latest_dt(t)) is None or d >= since
+        ]
     return {t[0]["msg_id"]: t for t in threads}
 
 

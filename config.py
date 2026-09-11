@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -36,8 +37,35 @@ JUDGE_MODEL = "gpt-4o"
 # --- Vector DB ---
 COLLECTION_NAME = "georgia_chats"
 
+# --- Ingest ---
+# Cutoff by DATE, not by count: a fixed message count pulls ~2 years of a quiet
+# chat but only ~3 months of a busy one. INGEST_SINCE is the oldest message we
+# trust as source content; messages up to INGEST_PARENT_LOOKBACK_DAYS before it
+# are still fetched, but only to serve as reply-parents / context for threads
+# that have activity after the cutoff (see src/knowledge.py). Empty string =
+# no date cutoff (fall back to INGEST_LIMIT alone).
+INGEST_SINCE = "2025-03-01"       # ISO date; revisit when type-based ranking lands
+INGEST_PARENT_LOOKBACK_DAYS = 30  # extra history before the cutoff, parents only
+INGEST_LIMIT = 50000              # safety cap on messages fetched per chat per run
+
+
+def ingest_since_dt() -> datetime | None:
+    """INGEST_SINCE as a UTC datetime — the real cutoff for trusted content."""
+    if not INGEST_SINCE:
+        return None
+    return datetime.fromisoformat(INGEST_SINCE).replace(tzinfo=timezone.utc)
+
+
+def ingest_fetch_floor_dt() -> datetime | None:
+    """How far back ingest actually fetches: the cutoff minus the parent-lookback
+    tail. None means 'no floor' (bounded only by INGEST_LIMIT)."""
+    since = ingest_since_dt()
+    if since is None:
+        return None
+    return since - timedelta(days=INGEST_PARENT_LOOKBACK_DAYS)
+
+
 # --- Pipeline parameters ---
-INGEST_LIMIT = 5000          # how many recent messages to fetch per chat
 FILTER_SPAM = True           # drop spam (money / drugs / ads / pets) before chunking; questions are kept
 CHUNK_MAX_GAP_MINUTES = 10   # if the gap between messages exceeds this, start a new chunk
 CHUNK_MAX_CHARS = 1500       # max chunk size in characters

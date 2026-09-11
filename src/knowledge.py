@@ -17,10 +17,15 @@ import json
 from pathlib import Path
 
 import config
-from src.preprocess import _load_raw
+from src.preprocess import _load_raw, _parse_dt
 from src.spam import filter_spam
 from src.store import openai_client
 from src.threads import build_threads
+
+
+def _thread_latest_dt(thread: list[dict]):
+    dts = [d for d in (_parse_dt(m.get("date")) for m in thread) if d]
+    return max(dts) if dts else None
 
 # Russian on purpose: source chats and the target assistant are Russian-speaking.
 SYSTEM_PROMPT = (
@@ -131,6 +136,10 @@ def distill_chat(
         min_thread_size: skip threads with fewer messages (default 2 = only
             discussions; set 1 to also distill standalone informative messages).
         write: also write data/knowledge/<username>.jsonl.
+
+    Threads whose latest message is older than config.INGEST_SINCE are skipped:
+    those live in the parent-lookback tail and exist only to give reply context
+    to threads that are still active in the trusted window.
     """
     chat = next((c for c in config.CHATS if c["username"] == username), None)
     if chat is None:
@@ -141,7 +150,17 @@ def distill_chat(
         raise SystemExit(f"{raw_path} not found — run src.ingest first")
 
     msgs, _ = filter_spam(_load_raw(raw_path)) if config.FILTER_SPAM else (_load_raw(raw_path), [])
+    since = config.ingest_since_dt()
     threads = [t for t in build_threads(msgs) if len(t) >= min_thread_size]
+    if since is not None:
+        before = len(threads)
+        threads = [
+            t for t in threads
+            if (d := _thread_latest_dt(t)) is None or d >= since
+        ]
+        dropped = before - len(threads)
+        if dropped:
+            print(f"[knowledge] {username}: skipped {dropped} threads older than {since.date()}")
     if limit is not None:
         threads = threads[:limit]
 

@@ -13,7 +13,9 @@ proprietorship/business, driver's licenses, rent, services, classifieds, etc.).
 Telegram → ingest → preprocess/chunk → embed+index (Chroma) → retrieve → GPT → bot
 ```
 
-- **ingest** — fetch chat history into `data/raw/*.jsonl` (Telethon)
+- **ingest** — fetch chat history into `data/raw/*.jsonl` (Telethon). Cutoff by
+  date (`INGEST_SINCE` in `config.py`), not by count; re-runs append only new
+  messages
 - **preprocess** — drop spam (money / drugs / ads / pet-rehoming; questions are
   kept), then group messages into dialog chunks `data/chunks/*.jsonl`
   (time windows + reply chains)
