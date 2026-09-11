@@ -33,6 +33,10 @@ CHAT_MODEL = "gpt-4o-mini"
 # Eval judge: deliberately a stronger, different model than CHAT_MODEL so it
 # doesn't share the distiller's blind spots (src/eval_knowledge.py).
 JUDGE_MODEL = "gpt-4o"
+# Second opinion for faithful=false drops (src/fix_knowledge.py): a genuine
+# third model, stronger than both CHAT_MODEL and JUDGE_MODEL, for a real
+# cross-model check rather than distiller self-consistency.
+REVERIFY_MODEL = "gpt-4.1"
 
 # --- Vector DB ---
 COLLECTION_NAME = "georgia_chats"

@@ -10,9 +10,12 @@ What this does with each verdict:
   fix  — adopt type_suggested when type_ok=false; re-split into atomic
          sub-pairs via LLM when atomic=false (both can apply to the same unit).
   drop — if faithful=false, get a SECOND independent opinion from
-         config.CHAT_MODEL (the distiller's own model, not the stronger judge)
-         before discarding — agreement confirms the drop, disagreement routes
-         the unit to "disputed" for manual review instead of auto-dropping.
+         config.REVERIFY_MODEL — a genuine third model, stronger than both
+         CHAT_MODEL and JUDGE_MODEL — before discarding — only drop when BOTH
+         agree it's unfaithful. If the second judge disagrees,
+         the pair is NOT confidently unfaithful, so it is kept (returned in
+         `kept`, and also separately in `rescued` so you can see which
+         "keep"s came from a disagreement rather than a clean verdict).
          useful=false drops (one-off/no-answer/restated — already fairly
          rule-based) are NOT re-verified, per the scope asked for.
 
@@ -78,7 +81,7 @@ def _reverify_one(unit: dict, judged_row: dict, thread: list[dict] | None) -> di
         return {"unit": unit, "confirmed": True, "reverify_note": "исходный тред не найден"}
     client = openai_client()
     resp = client.chat.completions.create(
-        model=config.CHAT_MODEL,
+        model=config.REVERIFY_MODEL,
         temperature=0,
         response_format={"type": "json_object"},
         messages=[
@@ -113,7 +116,8 @@ def fix_batch(
     `units` and `judged` must be the SAME batch in the SAME order (e.g. the
     exact lists you passed to / got back from eval_knowledge.judge_units).
 
-    Returns {"kept": [...], "fixed": [...], "dropped": [...], "disputed": [...]}.
+    Returns {"kept": [...], "fixed": [...], "dropped": [...], "rescued": [...]}
+    — `rescued` is the subset of `kept` where the 2nd judge overruled a drop.
     """
     kept: list[dict] = []
     fixed_simple: list[dict] = []
@@ -147,15 +151,21 @@ def fix_batch(
     reverified = _run_parallel(
         lambda triple: _reverify_one(*triple), needs_reverify, label="fix:reverify"
     )
-    disputed: list[dict] = []
+    # Second judge disagreed => not confidently unfaithful => keep it. Tagged
+    # (not silently merged) so you can still see which "keep"s were rescued
+    # this way — returned separately as `rescued`, a subset already folded
+    # into `kept`.
+    rescued: list[dict] = []
     for r in reverified:
         if r["confirmed"]:
             dropped.append({**r["unit"], "drop_reason": r["judge_note"], "reverify_note": r["reverify_note"]})
         else:
-            disputed.append({**r["unit"], "judge_note": r["judge_note"], "reverify_note": r["reverify_note"]})
+            ru = {**r["unit"], "judge_note": r["judge_note"], "reverify_note": r["reverify_note"]}
+            rescued.append(ru)
+            kept.append(ru)
 
     print(
-        f"[fix] kept={len(kept)} fixed={len(fixed)} dropped={len(dropped)} "
-        f"disputed={len(disputed)}"
+        f"[fix] kept={len(kept)} (of which rescued by 2nd judge: {len(rescued)}) "
+        f"fixed={len(fixed)} dropped={len(dropped)}"
     )
-    return {"kept": kept, "fixed": fixed, "dropped": dropped, "disputed": disputed}
+    return {"kept": kept, "fixed": fixed, "dropped": dropped, "rescued": rescued}
