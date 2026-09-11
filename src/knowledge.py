@@ -20,7 +20,7 @@ from pathlib import Path
 import config
 from src.preprocess import _load_raw, _parse_dt
 from src.spam import filter_spam
-from src.store import openai_client
+from src.store import chat_json
 from src.threads import build_threads
 
 
@@ -84,11 +84,17 @@ SYSTEM_PROMPT = (
     "справка остаётся полезной; важно не свежесть, а сколько источников "
     "подтверждают. Например: «где обменять валюту» — vote_based (способ, без "
     "суммы); «сколько стоит обменять валюту» — date_based (это уже сумма).\n"
-    "8. Тред может дать несколько пар или ни одной. Если долговечного знания "
+    "8. `city` — конкретный город (Тбилиси/Батуми/Кутаиси/...), ЕСЛИ вопрос "
+    "или ответ реально привязаны к одному городу. Указывай город ТОЛЬКО если "
+    "он явно назван в треде — никогда не угадывай по намёкам (улицы, районы "
+    "без названия города погоды не делают). Если знание общегрузинское "
+    "(визы, налоги, ИП, общий совет не про конкретное место) — city: null.\n"
+    "9. Тред может дать несколько пар или ни одной. Если долговечного знания "
     "нет — верни {\"knowledge\": []}.\n"
-    "9. Язык ответа — русский.\n\n"
+    "10. Язык ответа — русский.\n\n"
     "Формат ответа строго: "
-    "{\"knowledge\": [{\"question\": \"...\", \"answer\": \"...\", \"type\": \"date_based|vote_based\"}]}"
+    "{\"knowledge\": [{\"question\": \"...\", \"answer\": \"...\", "
+    "\"type\": \"date_based|vote_based\", \"city\": \"Тбилиси|null\"}]}"
 )
 
 
@@ -100,24 +106,66 @@ def _thread_text(thread: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def distill_thread(thread: list[dict], chat: dict) -> list[dict]:
-    """Return a list of knowledge units for one thread (possibly empty)."""
-    client = openai_client()
-    resp = client.chat.completions.create(
-        model=config.CHAT_MODEL,
-        temperature=0.1,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _thread_text(thread)},
-        ],
-    )
-    try:
-        data = json.loads(resp.choices[0].message.content)
-        items = data.get("knowledge", [])
-    except (json.JSONDecodeError, AttributeError):
-        return []
+def _thread_text_with_ids(thread: list[dict]) -> str:
+    """Like _thread_text, but each line is tagged [msg_id] so the branch split
+    (stage 1a) can reference original messages by id, and stage 1b can check
+    the split against the raw thread it's also given."""
+    lines = []
+    for m in thread:
+        sender = m.get("sender") or "Аноним"
+        lines.append(f"[{m['msg_id']}] {sender}: {m['text']}")
+    return "\n".join(lines)
 
+
+# Stage 1a (new): split the raw thread into semantic branches before
+# extraction. This is a DRAFT for stage 1b, not ground truth by itself — see
+# distill_thread, which always keeps the raw thread as the authoritative
+# source and passes the split only as a hint stage 1b may correct.
+SPLIT_SYSTEM = (
+    "Раздели тред Telegram-чата (каждое сообщение помечено [id]) на отдельные "
+    "смысловые ветки — независимые темы/вопросы, которые в нём обсуждаются "
+    "(тред мог собраться по времени и реплаям, а не по теме, поэтому внутри "
+    "могут быть несвязанные разговоры). Не меняй и не пересказывай текст "
+    "сообщений — верни только id сообщений, входящих в каждую ветку, в "
+    "исходном порядке.\n"
+    "Ответь строго JSON: {\"branches\": [{\"topic\": \"кратко тема\", "
+    "\"message_ids\": [id, id, ...]}]}"
+)
+
+
+def _split_branches(thread: list[dict]) -> list[dict]:
+    """Stage 1a call: ask config.SPLIT_MODEL to group the thread's messages
+    into semantic branches by id. Returns the raw branch list (possibly
+    empty on failure — distill_thread then falls back to the raw thread alone)."""
+    data = chat_json(
+        config.SPLIT_MODEL, SPLIT_SYSTEM, _thread_text_with_ids(thread),
+        reasoning_effort=config.SPLIT_REASONING_EFFORT,
+    )
+    return data.get("branches") or []
+
+
+def _branches_text(thread: list[dict], branches: list[dict]) -> str:
+    """Render id-based branches back to the same [id] Sender: text lines as
+    the raw thread, so stage 1b can cross-check the split against ground
+    truth it's given alongside (see distill_thread)."""
+    by_id = {m["msg_id"]: m for m in thread}
+    lines: list[str] = []
+    for b in branches:
+        topic = (b.get("topic") or "").strip()
+        lines.append(f"### {topic}" if topic else "### (без темы)")
+        for mid in b.get("message_ids") or []:
+            m = by_id.get(mid)
+            if m:
+                sender = m.get("sender") or "Аноним"
+                lines.append(f"[{mid}] {sender}: {m['text']}")
+    return "\n".join(lines)
+
+
+def _items_to_units(items: list[dict], thread: list[dict], chat: dict) -> list[dict]:
+    """Shared post-processing: raw {"question","answer","type"} dicts from
+    either extraction path -> validated knowledge units. Identical for
+    distill_thread and distill_thread_one_stage so an A/B comparison isolates
+    the extraction call itself, not this filtering."""
     root = thread[0]
     # latest activity in the thread — used later for recency weighting
     thread_date = thread[-1].get("date") or root.get("date") or ""
@@ -132,11 +180,15 @@ def distill_thread(thread: list[dict], chat: dict) -> list[dict]:
         ktype = (it.get("type") or "vote_based").strip().lower()
         if ktype not in {"date_based", "vote_based"}:
             ktype = "vote_based"
+        city = (it.get("city") or "").strip() or None
+        if city and city.lower() in {"null", "none", "-"}:
+            city = None  # model sometimes writes the literal word instead of JSON null
         out.append(
             {
                 "question": q,
                 "answer": a,
                 "type": ktype,
+                "city": city,
                 "date": thread_date,
                 "chat_username": chat["username"],
                 "chat_title": chat["title"],
@@ -145,6 +197,52 @@ def distill_thread(thread: list[dict], chat: dict) -> list[dict]:
             }
         )
     return out
+
+
+def distill_thread(thread: list[dict], chat: dict) -> list[dict]:
+    """Return a list of knowledge units for one thread (possibly empty).
+
+    Stage 1 is two sequential calls: config.SPLIT_MODEL first groups the
+    thread into semantic branches by message id (_split_branches);
+    config.EXTRACT_MODEL then extracts knowledge using SYSTEM_PROMPT,
+    unchanged. The raw thread is always passed as ground truth alongside the
+    branch split, which is only a draft the extraction step may correct — it
+    is never used as truth on its own (a thread can mix unrelated topics; the
+    split can be wrong).
+    """
+    raw_text = _thread_text_with_ids(thread)
+    branches = _split_branches(thread)
+    branches_text = _branches_text(thread, branches) if branches else ""
+    user_content = (
+        (
+            f"ИСХОДНЫЙ ТРЕД (источник истины — опирайся на него):\n{raw_text}\n\n"
+            f"ЧЕРНОВОЕ РАЗДЕЛЕНИЕ НА ВЕТКИ (может содержать ошибки, это только "
+            f"подсказка, не факт):\n{branches_text}"
+        )
+        if branches_text
+        else raw_text  # split call failed/empty — fall back to raw-only, as before
+    )
+
+    data = chat_json(
+        config.EXTRACT_MODEL, SYSTEM_PROMPT, user_content,
+        temperature=0.1, reasoning_effort=config.EXTRACT_REASONING_EFFORT,
+    )
+    return _items_to_units(data.get("knowledge", []), thread, chat)
+
+
+def distill_thread_one_stage(thread: list[dict], chat: dict) -> list[dict]:
+    """A/B comparison variant: config.EXTRACT_MODEL extracts DIRECTLY from the
+    raw thread, no branch-split call first (the split stage skipped entirely,
+    not just ignored). Same SYSTEM_PROMPT, same post-processing
+    (_items_to_units) as distill_thread — the only difference under test is
+    whether the split call helps. Not used by distill_chat/the main pipeline;
+    call it directly to compare against distill_thread on the same threads.
+    """
+    data = chat_json(
+        config.EXTRACT_MODEL, SYSTEM_PROMPT, _thread_text_with_ids(thread),
+        temperature=0.1, reasoning_effort=config.EXTRACT_REASONING_EFFORT,
+    )
+    return _items_to_units(data.get("knowledge", []), thread, chat)
 
 
 def select_threads(

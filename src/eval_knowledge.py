@@ -1,12 +1,14 @@
 """Validate the knowledge distillation step (src/knowledge.py) at scale.
 
-Reading every distilled Q&A by hand doesn't scale, so a stronger LLM
-(config.JUDGE_MODEL, separate from the distiller) checks each unit against its
-source thread and flags the bad ones. Two passes:
+Reading every distilled Q&A by hand doesn't scale, so an LLM (config.JUDGE_MODEL,
+separate from the distiller) checks each unit against its source thread and
+flags the bad ones. Two passes:
 
-  precision — for every knowledge unit: is the answer supported by the thread
-              (no invention), is it one atomic topic, is it durable reference
-              knowledge, is the `type` label right? -> verdict keep/fix/drop.
+  precision — ONE call per thread (judge_thread), judging every knowledge unit
+              extracted from it together: is each answer supported by the
+              thread (no invention), is it one atomic topic, is it durable
+              reference knowledge, is the `type` label right? -> verdict
+              keep/fix/drop per unit.
 
   recall    — sample threads that produced NOTHING and ask whether reusable
               knowledge was actually there and got missed.
@@ -19,8 +21,8 @@ plus a summary to stdout and a dump of everything not marked "keep".
 Run:  uv run python -m src.eval_knowledge helpgeorgia
       uv run python -m src.eval_knowledge helpgeorgia --limit 40 --recall-sample 30
 
-⚠️ Spends OpenAI tokens: one JUDGE_MODEL call per unit + per sampled thread.
-For helpgeorgia (~220 units) this is a few hundred cheap calls.
+⚠️ Spends OpenAI tokens: one JUDGE_MODEL call per thread (not per unit) + one
+per sampled empty thread for recall.
 """
 from __future__ import annotations
 
@@ -38,15 +40,16 @@ import config
 from src.knowledge import _thread_latest_dt, _thread_text
 from src.preprocess import _load_raw
 from src.spam import filter_spam
-from src.store import openai_client
+from src.store import chat_json
 from src.threads import build_threads
 
 # --- Judge prompts (Russian: the content and the labels are Russian) ----------
 
 PRECISION_SYSTEM = (
     "Ты — строгий редактор справочной базы знаний о жизни в Грузии. На вход: "
-    "исходный тред Telegram-чата и одна пара «вопрос-ответ», извлечённая из "
-    "него автоматически. Оцени пару ТОЛЬКО по этому треду.\n\n"
+    "исходный тред Telegram-чата и СПИСОК пар «вопрос-ответ», извлечённых из "
+    "него автоматически. Оцени КАЖДУЮ пару по отдельности, ТОЛЬКО по этому "
+    "треду.\n\n"
     "⚠️ Тред может содержать НЕСКОЛЬКО параллельных вопросов от разных людей "
     "вперемешку (собран по времени и реплаям, а не по теме) — определи, какие "
     "реплики отвечают именно на оцениваемый вопрос. Если тред явно не называет "
@@ -68,26 +71,33 @@ PRECISION_SYSTEM = (
     "тренер по фитнесу, орбитрек лучше для суставов, чем дорожка» — useful=true "
     "(это мнение практика по теме вопроса), даже если это не врач и мнение "
     "пока единственное.\n"
-    "4. type_ok — метка `type` верна:\n"
+    "4. type_suggested — какой `type` ПРАВИЛЬНЫЙ для этой пары:\n"
     "   - date_based — официально устанавливаемое (законы, налоги, визовые/"
     "таможенные требования, документы, тарифы) И любая конкретная ЦЕНА/СУММА;\n"
     "   - vote_based — всё остальное долговечное: рекомендация ГДЕ/У КОГО/"
     "КАКИМ СПОСОБОМ без суммы в ответе, а также вневременные факты. Например: "
-    "«где обменять валюту» — vote_based; «сколько стоит обменять валюту» — "
-    "date_based (это уже сумма).\n"
-    "   Не требуй date_based только потому что что-то теоретически может "
-    "измениться — это верно почти для всего.\n\n"
-    "verdict — строго следует из полей выше, не отдельное мнение:\n"
-    "  - faithful=false ИЛИ useful=false → всегда drop (это не лечится правкой, "
-    "неважно, что с atomic/type_ok);\n"
-    "  - faithful=true И useful=true И (atomic=false ИЛИ type_ok=false) → fix;\n"
-    "  - faithful=true И atomic=true И useful=true И type_ok=true → keep.\n\n"
-    "Сначала напиши `note` (что не так и какой тип правильный, если что-то не "
-    "так), и только потом остальные поля — они обязаны совпадать с note.\n"
-    "Ответь строго JSON, в этом порядке ключей: "
-    "{\"note\": \"...\", \"faithful\": bool, \"atomic\": bool, \"useful\": bool, "
-    "\"type_ok\": bool, \"type_suggested\": \"date_based|vote_based\", "
-    "\"verdict\": \"keep|fix|drop\"}"
+    "«где обменять валюту» и «где оформить документ» — vote_based (это вопрос "
+    "МЕСТА, не суммы и не самого требования); «сколько стоит обменять валюту», "
+    "«какие документы нужны для X» — date_based.\n"
+    "   Не выбирай date_based только потому что что-то теоретически может "
+    "измениться — это верно почти для всего.\n"
+    "5. city_suggested — какой ГОРОД правильный для этой пары: конкретный город, "
+    "ЕСЛИ вопрос/ответ реально о конкретном месте (и тред явно его называет), "
+    "иначе null (знание общегрузинское, не привязано к одному месту). НЕ "
+    "исправляй/угадывай city по своим фоновым знаниям о географии Грузии — "
+    "только по тому, что явно написано в треде.\n\n"
+    "Не указывай type_ok/city_ok/verdict — это вычисляется отдельно, сравнением "
+    "твоих type_suggested/city_suggested с тем, что было дано в паре. Твоя "
+    "задача — только назвать правильные значения и объяснить в note, если "
+    "заданные отличаются от них.\n\n"
+    "Для КАЖДОЙ пары сначала напиши `note` (что не так, если что-то не так), и "
+    "только потом остальные поля — они обязаны совпадать с note.\n"
+    "Ответь строго JSON: {\"judgments\": [{\"index\": 0, \"note\": \"...\", "
+    "\"faithful\": bool, \"atomic\": bool, \"useful\": bool, "
+    "\"type_suggested\": \"date_based|vote_based\", "
+    "\"city_suggested\": \"Тбилиси|null\"}, "
+    "...]} — ровно один объект на каждую входную пару, `index` = номер пары "
+    "во входном списке (с нуля), в том же порядке."
 )
 
 RECALL_SYSTEM = (
@@ -105,20 +115,10 @@ RECALL_SYSTEM = (
 
 
 def _judge(system: str, user: str) -> dict:
-    client = openai_client()
-    resp = client.chat.completions.create(
-        model=config.JUDGE_MODEL,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+    return chat_json(
+        config.JUDGE_MODEL, system, user,
+        temperature=0, reasoning_effort=config.JUDGE_REASONING_EFFORT,
     )
-    try:
-        return json.loads(resp.choices[0].message.content)
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        return {}
 
 
 # --- Rebuild the source threads, keyed by root message id ---------------------
@@ -152,38 +152,110 @@ def _load_knowledge(username: str) -> list[dict]:
 
 # --- Pass 1: precision ------------------------------------------------------
 
+def _pairs_block(units: list[dict]) -> str:
+    return "\n\n".join(
+        f"[{i}] Вопрос: {u['question']}\nОтвет: {u['answer']}\nТип: {u['type']}\n"
+        f"Город: {u.get('city') or 'null'}"
+        for i, u in enumerate(units)
+    )
+
+
+def _norm_city(c) -> str | None:
+    c = (c or "").strip()
+    if not c or c.lower() in {"null", "none", "-"}:
+        return None
+    return c
+
+
+def judge_thread(thread: list[dict], units: list[dict]) -> list[dict]:
+    """Judge ALL knowledge units extracted from ONE thread in a SINGLE call
+    (config.JUDGE_MODEL) — cheaper than one call per unit and avoids resending
+    the same thread text once per unit. Returns judgments in the same order
+    as `units`.
+
+    The model only reports the raw signals (faithful/atomic/useful and what
+    it thinks type/city SHOULD be) — type_ok, city_ok and verdict are computed
+    HERE, deterministically, rather than asked of the model. Earlier versions
+    had the model self-report all of these and it repeatedly produced
+    self-contradictory JSON (e.g. type_ok=true with a type_suggested that
+    didn't match the given type) despite explicit prompt instructions not to.
+    Computing the derived fields in code makes that class of bug structurally
+    impossible instead of relying on the model to keep them consistent.
+    """
+    if not units:
+        return []
+    user = f"ТРЕД:\n{_thread_text(thread)}\n\nПАРЫ:\n{_pairs_block(units)}"
+    data = _judge(PRECISION_SYSTEM, user)
+    by_index = {j.get("index"): j for j in (data.get("judgments") or []) if isinstance(j, dict)}
+    out = []
+    for i, u in enumerate(units):
+        j = by_index.get(i, {})
+        faithful, atomic, useful = j.get("faithful"), j.get("atomic"), j.get("useful")
+        type_suggested = j.get("type_suggested")
+        city_suggested = _norm_city(j.get("city_suggested"))
+        type_ok = (type_suggested == u["type"]) if type_suggested else None
+        city_ok = city_suggested == _norm_city(u.get("city"))
+
+        if faithful is False or useful is False:
+            verdict = "drop"
+        elif faithful is True and useful is True and atomic is True and type_ok is True and city_ok is True:
+            verdict = "keep"
+        elif faithful is True and useful is True:
+            verdict = "fix"
+        else:
+            verdict = "error"  # judge didn't return faithful/useful for this pair
+
+        out.append({
+            **_unit_ref(u),
+            "faithful": faithful,
+            "atomic": atomic,
+            "useful": useful,
+            "type_ok": type_ok,
+            "type_suggested": type_suggested,
+            "city_ok": city_ok,
+            "city_suggested": city_suggested,
+            "verdict": verdict,
+            "note": (j.get("note") or "").strip(),
+        })
+    return out
+
+
 def judge_units(
     units: list[dict], threads_by_root: dict[int, list[dict]], *, label: str = "eval:precision"
 ) -> list[dict]:
-    """Judge a list of knowledge units against their source threads. This is
+    """Judge a list of knowledge units against their source threads, batched
+    ONE call PER THREAD (judge_thread) rather than one call per unit. This is
     the reusable core of eval_precision — call it directly from a notebook to
     judge an in-memory batch (e.g. a cheap distill_chat(limit=..., write=False)
-    prototype run) without touching data/knowledge/*.jsonl at all."""
+    prototype run) without touching data/knowledge/*.jsonl at all.
 
-    def judge_one(u: dict) -> dict:
-        thread = threads_by_root.get(u["root_msg_id"])
+    Output preserves the input `units` order (not grouped by thread), so it
+    still zips 1:1 with `units` the way src.fix_knowledge.fix_batch expects.
+    """
+    groups: dict[int, list[int]] = {}
+    for idx, u in enumerate(units):
+        groups.setdefault(u["root_msg_id"], []).append(idx)
+
+    def judge_group(root_msg_id: int) -> list[tuple[int, dict]]:
+        idxs = groups[root_msg_id]
+        group_units = [units[i] for i in idxs]
+        thread = threads_by_root.get(root_msg_id)
         if thread is None:
             # No matching source thread (e.g. code or spam patterns changed
-            # since, or you're judging a batch build from different threads).
-            return {**_unit_ref(u), "verdict": "skip", "note": "исходный тред не найден"}
-        user = (
-            f"ТРЕД:\n{_thread_text(thread)}\n\n"
-            f"ПАРА:\nВопрос: {u['question']}\nОтвет: {u['answer']}\n"
-            f"Тип: {u['type']}"
-        )
-        j = _judge(PRECISION_SYSTEM, user)
-        return {
-            **_unit_ref(u),
-            "faithful": j.get("faithful"),
-            "atomic": j.get("atomic"),
-            "useful": j.get("useful"),
-            "type_ok": j.get("type_ok"),
-            "type_suggested": j.get("type_suggested"),
-            "verdict": j.get("verdict", "error"),
-            "note": (j.get("note") or "").strip(),
-        }
+            # since, or you're judging a batch built from different threads).
+            rows = [
+                {**_unit_ref(units[i]), "verdict": "skip", "note": "исходный тред не найден"}
+                for i in idxs
+            ]
+        else:
+            rows = judge_thread(thread, group_units)
+        return list(zip(idxs, rows))
 
-    return _run_parallel(judge_one, units, label=label)
+    out: list[dict | None] = [None] * len(units)
+    for pairs in _run_parallel(judge_group, list(groups.keys()), label=label):
+        for idx, row in pairs:
+            out[idx] = row
+    return out
 
 
 def eval_precision(
@@ -209,6 +281,7 @@ def _unit_ref(u: dict) -> dict:
         "question": u["question"],
         "answer": u["answer"],
         "type": u["type"],
+        "city": u.get("city"),
     }
 
 
@@ -217,7 +290,7 @@ def _report_precision(rows: list[dict]) -> None:
     n = len(judged) or 1
     print(f"\n=== precision: {len(judged)} judged "
           f"({len(rows) - len(judged)} skipped/errored) ===")
-    for key in ("faithful", "atomic", "useful", "type_ok"):
+    for key in ("faithful", "atomic", "useful", "type_ok", "city_ok"):
         ok = sum(1 for r in judged if r.get(key) is True)
         print(f"  {key:9}: {ok:4}/{n}  ({100 * ok // n}%)")
     print("  verdict   :", dict(Counter(r["verdict"] for r in judged)))

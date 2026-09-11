@@ -1,18 +1,20 @@
 """Apply fixes to knowledge units based on eval_knowledge's judgements.
 
 PRECISION_SYSTEM enforces verdict=fix ⟹ faithful=true and useful=true (see
-eval_knowledge.py) — so a "fix" verdict only ever means a type or atomicity
-defect, never a faithfulness problem. A "drop" verdict means faithful=false
-or useful=false.
+eval_knowledge.py) — so a "fix" verdict only ever means a type, city, or
+atomicity defect, never a faithfulness problem. A "drop" verdict means
+faithful=false or useful=false.
 
 What this does with each verdict:
   keep — unchanged.
-  fix  — adopt type_suggested when type_ok=false; re-split into atomic
-         sub-pairs via LLM when atomic=false (both can apply to the same unit).
+  fix  — adopt type_suggested when type_ok=false; adopt city_suggested when
+         city_ok=false (can legitimately be null, e.g. clearing a wrongly
+         attached city); re-split into atomic sub-pairs via config.FIX_MODEL
+         when atomic=false (any/all of these can apply to the same unit).
   drop — if faithful=false, get a SECOND independent opinion from
-         config.REVERIFY_MODEL — a genuine third model, stronger than both
-         CHAT_MODEL and JUDGE_MODEL — before discarding — only drop when BOTH
-         agree it's unfaithful. If the second judge disagrees,
+         config.REVERIFY_MODEL — a genuine third model, deliberately not shown
+         the first judge's verdict/note — before discarding — only drop when
+         BOTH agree it's unfaithful. If the second judge disagrees,
          the pair is NOT confidently unfaithful, so it is kept (returned in
          `kept`, and also separately in `rescued` so you can see which
          "keep"s came from a disagreement rather than a clean verdict).
@@ -27,12 +29,10 @@ this is still a prototype step downstream of eval_knowledge.
 """
 from __future__ import annotations
 
-import json
-
 import config
 from src.eval_knowledge import _run_parallel
 from src.knowledge import _thread_text
-from src.store import openai_client
+from src.store import chat_json
 
 ATOMIZE_SYSTEM = (
     "Пара «вопрос-ответ» ниже на самом деле смешивает несколько разных тем. "
@@ -51,21 +51,12 @@ REVERIFY_SYSTEM = (
 
 
 def _atomize_one(unit: dict) -> list[dict]:
-    client = openai_client()
-    resp = client.chat.completions.create(
-        model=config.CHAT_MODEL,  # same model as the distiller
+    data = chat_json(
+        config.FIX_MODEL, ATOMIZE_SYSTEM,
+        f"Вопрос: {unit['question']}\nОтвет: {unit['answer']}",
         temperature=0.1,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": ATOMIZE_SYSTEM},
-            {"role": "user", "content": f"Вопрос: {unit['question']}\nОтвет: {unit['answer']}"},
-        ],
     )
-    try:
-        data = json.loads(resp.choices[0].message.content)
-        pairs = data.get("pairs", [])
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        pairs = []
+    pairs = data.get("pairs", [])
     out = [
         {**unit, "question": (p.get("question") or "").strip(), "answer": (p.get("answer") or "").strip()}
         for p in pairs
@@ -79,26 +70,11 @@ def _reverify_one(unit: dict, judged_row: dict, thread: list[dict] | None) -> di
         # Can't re-verify without the source thread — treat as still-dropped
         # rather than silently keeping something we can't check.
         return {"unit": unit, "confirmed": True, "reverify_note": "исходный тред не найден"}
-    client = openai_client()
-    resp = client.chat.completions.create(
-        model=config.REVERIFY_MODEL,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": REVERIFY_SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    f"ТРЕД:\n{_thread_text(thread)}\n\n"
-                    f"Вопрос: {unit['question']}\nОтвет: {unit['answer']}"
-                ),
-            },
-        ],
+    rv = chat_json(
+        config.REVERIFY_MODEL, REVERIFY_SYSTEM,
+        f"ТРЕД:\n{_thread_text(thread)}\n\nВопрос: {unit['question']}\nОтвет: {unit['answer']}",
+        temperature=0, reasoning_effort=config.REVERIFY_REASONING_EFFORT,
     )
-    try:
-        rv = json.loads(resp.choices[0].message.content)
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        rv = {}
     confirmed = rv.get("faithful") is False  # second judge agrees it's unfaithful
     return {
         "unit": unit,
@@ -133,6 +109,11 @@ def fix_batch(
             fu = dict(u)
             if not j.get("type_ok") and j.get("type_suggested"):
                 fu["type"] = j["type_suggested"]
+            if not j.get("city_ok"):
+                cs = j.get("city_suggested")
+                # the corrected city can legitimately be null (e.g. a wrongly
+                # attached city should be cleared), so don't require truthiness
+                fu["city"] = None if (not cs or str(cs).strip().lower() in {"null", "none", "-"}) else cs
             if not j.get("atomic"):
                 needs_atomize.append(fu)
             else:

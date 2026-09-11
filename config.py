@@ -29,14 +29,48 @@ TELEGRAM_PHONE = os.getenv("TELEGRAM_PHONE", "")
 
 # --- OpenAI models ---
 EMBED_MODEL = "text-embedding-3-small"
-CHAT_MODEL = "gpt-4o-mini"
-# Eval judge: deliberately a stronger, different model than CHAT_MODEL so it
-# doesn't share the distiller's blind spots (src/eval_knowledge.py).
-JUDGE_MODEL = "gpt-4o"
-# Second opinion for faithful=false drops (src/fix_knowledge.py): a genuine
-# third model, stronger than both CHAT_MODEL and JUDGE_MODEL, for a real
-# cross-model check rather than distiller self-consistency.
-REVERIFY_MODEL = "gpt-4.1"
+CHAT_MODEL = "gpt-4o-mini"  # kept as the "old model" reference value for reverts below
+
+# --- Distillation stage 1 (src/knowledge.py), split into two sequential calls ---
+# 1a splits the raw thread into semantic branches (message ids only, so the
+# link back to original messages is explicit); 1b extracts knowledge from
+# those branches PLUS the raw thread (raw thread is always ground truth — 1a's
+# split is a draft 1b may correct, never fed to anything else as truth).
+# Independently configurable so any piece can be reverted/swapped alone:
+#   - revert the whole stage to the old single-call pipeline: set both models to CHAT_MODEL
+#   - use gpt-4.1-mini only for extraction: EXTRACT_MODEL = "gpt-4.1-mini" (leave SPLIT_MODEL)
+SPLIT_MODEL = "gpt-5.6-luna"
+SPLIT_REASONING_EFFORT = "low"
+EXTRACT_MODEL = "gpt-5.6-luna"
+EXTRACT_REASONING_EFFORT = "low"
+
+# Stage 3: main validation (src/eval_knowledge.py) — one call per THREAD,
+# judging every knowledge unit extracted from it together. Classic model, no
+# reasoning_effort. Revert: JUDGE_MODEL = "gpt-4o".
+JUDGE_MODEL = "gpt-4.1-mini"
+JUDGE_REASONING_EFFORT = None
+
+# Applying "fix" verdicts (src/fix_knowledge.py: type correction + re-atomize)
+# — cheap classic model, separate from CHAT_MODEL (the distiller) so the two
+# can be tuned independently.
+FIX_MODEL = "gpt-4.1-mini"
+
+# Stage 4 (src/fix_knowledge.py): independent recheck of knowledge stage 3
+# marked invalid/for removal — a genuine third model, deliberately NOT shown
+# stage 3's verdict/reasoning, so it judges the raw thread fresh instead of
+# anchoring on the previous call. Its decision is final for what it reviews.
+# Revert: REVERIFY_MODEL = "gpt-4.1", REVERIFY_REASONING_EFFORT = None.
+# Candidate to try later instead: "gpt-5.6-sol".
+REVERIFY_MODEL = "gpt-5.6-terra"
+REVERIFY_REASONING_EFFORT = "medium"
+
+# Reasoning-family models accept only the default `temperature` (no custom
+# value) and support `reasoning_effort`; classic chat models are the reverse.
+# src/store.chat_json() uses this to pick the right call shape per model.
+REASONING_MODELS = {
+    "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+    "o1", "o1-mini", "o3", "o3-mini",
+}
 
 # --- Vector DB ---
 COLLECTION_NAME = "georgia_chats"

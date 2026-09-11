@@ -1,6 +1,8 @@
 """Shared helpers: OpenAI client, embeddings, access to the Chroma collection."""
 from __future__ import annotations
 
+import json
+
 import chromadb
 from openai import OpenAI
 
@@ -17,6 +19,42 @@ def openai_client() -> OpenAI:
             raise SystemExit("OPENAI_API_KEY is not set in .env")
         _openai = OpenAI(api_key=config.OPENAI_API_KEY)
     return _openai
+
+
+def chat_json(
+    model: str, system: str, user: str, *, temperature: float = 0, reasoning_effort: str | None = None
+) -> dict:
+    """One JSON-mode chat call, picking the right parameter shape for the model.
+
+    Reasoning-family models (config.REASONING_MODELS: gpt-5.6-*, o1/o3-*) only
+    accept the default `temperature` and use `reasoning_effort` instead;
+    classic chat models (gpt-4o*, gpt-4.1*) are the other way round. Callers
+    just pass both and this picks what's actually sent, so swapping a model in
+    config.py doesn't require touching call sites.
+
+    Returns the parsed JSON object, or {} if the model didn't return valid JSON.
+    """
+    client = openai_client()
+    kwargs: dict = {
+        "model": model,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    }
+    if model in config.REASONING_MODELS:
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+        # no `temperature`: these models only support the API default (1).
+    else:
+        kwargs["temperature"] = temperature
+
+    resp = client.chat.completions.create(**kwargs)
+    try:
+        return json.loads(resp.choices[0].message.content)
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return {}
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
