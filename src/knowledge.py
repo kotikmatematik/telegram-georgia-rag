@@ -14,6 +14,7 @@ notebook; eyeball the result before scaling up.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import config
@@ -27,45 +28,67 @@ def _thread_latest_dt(thread: list[dict]):
     dts = [d for d in (_parse_dt(m.get("date")) for m in thread) if d]
     return max(dts) if dts else None
 
+
+# Backstop for rule #3 of SYSTEM_PROMPT: even when told not to, the model
+# sometimes still writes a pair whose `answer` just states that there's no
+# answer (e.g. "информация ... в треде не указана"). Catch that mechanically
+# rather than trust prompt-following alone — same approach as src/spam.py.
+_NON_ANSWER_PATTERNS = [
+    # "информации .{0,60} не указана / нет / отсутствует" — allow a gap, since
+    # the actual subject usually sits between the trigger and the verdict
+    # ("информация О ПОКУПКЕ ОРБИТРЕКА ... в треде не указана").
+    r"информаци\w*.{0,120}?(не\s+(указан|предоставлен|найден|дан|сообщ)\w*|отсутствует|\bнет\b)",
+    r"не\s+(указан|предоставлен|найден|сообщ)\w*\s+(конкретн\w*\s+)?информаци",
+    r"нет\s+(точной|конкретной|)\s*информаци",
+    r"данн\w*\s+(отсутств\w*|не\s+(указан|предоставлен)\w*)",
+    r"\bнеизвестн\w*",
+]
+_NON_ANSWER_RX = re.compile("|".join(_NON_ANSWER_PATTERNS), re.IGNORECASE)
+
+
+def _is_non_answer(answer: str) -> bool:
+    return bool(_NON_ANSWER_RX.search(answer))
+
 # Russian on purpose: source chats and the target assistant are Russian-speaking.
 SYSTEM_PROMPT = (
     "Ты извлекаешь полезные ДОЛГОВЕЧНЫЕ знания о жизни в Грузии из переписок "
     "Telegram-чатов для справочного ассистента. На вход — один тред (обсуждение). "
     "Сформируй список пар «вопрос-ответ» в формате JSON.\n\n"
     "Правила:\n"
-    "1. Опирайся ТОЛЬКО на то, что реально сказано в треде. Ничего не выдумывай. "
-    "Если уверенности нет — не включай.\n"
-    "2. АТОМАРНОСТЬ — главное правило. Каждая пара = РОВНО ОДНА самостоятельная "
-    "тема/вопрос. Если в треде обсуждают несколько разных тем — раздели их на "
-    "НЕСКОЛЬКО отдельных пар. НИКОГДА не смешивай разные темы в одном ответе "
-    "(например, «как получить права» и «где стоматолог» — это две разные пары). "
-    "Несколько фактов или нюансов в рамках ОДНОЙ темы — объединяй в один ответ.\n"
-    "3. ЕСТЬ ОТВЕТ. Создавай пару, только если в треде есть реальный, полезный "
-    "ответ. Если на вопрос никто не ответил, или ответ по сути «информации нет» / "
-    "пересказ самого вопроса — НЕ включай такую пару.\n"
-    "4. ТОЛЬКО ДОЛГОВЕЧНОЕ ЗНАНИЕ. Нас интересует справочная информация, полезная "
-    "многим и надолго: процедуры, документы, как что устроено, общие советы «где/"
-    "как сделать X». НЕ извлекай разовые объявления: продажа/покупка конкретных "
-    "вещей, билеты, пристройство животных, разовые просьбы («кто едет», «ищу "
-    "попутчика», «перевезти Х числа»). Пример: «где вообще продать книги» → можно "
-    "(общий совет); «продаю конкретную арматуру / котёнка / билет» → пропустить.\n"
-    "5. `question` — общий вопрос по одной теме, как его задал бы новый человек "
-    "(без имён и лишнего контекста треда).\n"
-    "6. `answer` — связный практичный ответ по этой одной теме. Если мнения "
-    "расходятся или есть нюансы/условия — отрази это. Это мнения участников чата, "
-    "а не официальный источник.\n"
-    "7. ТИП. Для каждой пары укажи `type`:\n"
-    "   - \"volatile\" — меняется со временем: законы, правила, налоги, цены, "
-    "визовые/таможенные требования, требования к документам, расписания;\n"
-    "   - \"stable\" — рекомендации (врач, мастер, магазин, кафе, специалист), "
-    "практические советы «где/как», адреса и контакты;\n"
-    "   - \"evergreen\" — вневременное: история, география, культура, язык, "
-    "факты, которые почти не меняются.\n"
-    "8. Один тред может дать несколько пар или ни одной. Если долговечного знания "
+    "1. Опирайся ТОЛЬКО на то, что реально сказано в треде. Ничего не выдумывай.\n"
+    "2. АТОМАРНОСТЬ. Каждая пара = РОВНО ОДНА тема. Тред с несколькими темами — "
+    "раздели на несколько пар.\n"
+    "3. ЕСТЬ ОТВЕТ. Создавай пару, только если на вопрос реально ответили. Если "
+    "на какую-то тему в треде ответа нет — пропусти эту тему; никогда не пиши в "
+    "`answer` «информация не указана/нет в треде» — это повод не создавать пару, "
+    "а не ответ.\n"
+    "4. ТОЛЬКО ДОЛГОВЕЧНОЕ. Процедуры, документы, устройство, общие советы "
+    "«где/как». НЕ включай разовые объявления (продажа вещи, билет, пристройство "
+    "животного, «кто едет Х числа»).\n"
+    "5. `question` — общий вопрос по теме, как задал бы новый человек. Если "
+    "исходное сообщение содержит НЕСКОЛЬКО вопросов («где X и сколько это "
+    "стоит?»), а в треде ответили не на все — формулируй `question` под ТУ "
+    "часть, на которую реально ответили, а не копируй исходную формулировку "
+    "целиком. Пример: спросили «где сделать гравировку и сколько стоит», "
+    "ответили только «100 лари» — вопрос должен быть «сколько стоит "
+    "гравировка?», а НЕ «где сделать гравировку?» (на это не ответили).\n"
+    "6. `answer` — связный практичный ответ; если мнения расходятся — отрази "
+    "это. Это мнения чата, не официальный источник.\n"
+    "7. `type` — как эту пару потом использовать при ответе:\n"
+    "   - \"date_based\" — официально устанавливаемое (законы, налоги, визовые/"
+    "таможенные требования, документы, тарифы) И любая конкретная ЦЕНА/СУММА "
+    "— со временем меняется, важна самая свежая версия;\n"
+    "   - \"vote_based\" — всё остальное долговечное: рекомендация ГДЕ/У КОГО/"
+    "КАКИМ СПОСОБОМ без суммы в ответе, а также вневременные факты (история, "
+    "география, культура) — даже если место закроется или мнение спорно, "
+    "справка остаётся полезной; важно не свежесть, а сколько источников "
+    "подтверждают. Например: «где обменять валюту» — vote_based (способ, без "
+    "суммы); «сколько стоит обменять валюту» — date_based (это уже сумма).\n"
+    "8. Тред может дать несколько пар или ни одной. Если долговечного знания "
     "нет — верни {\"knowledge\": []}.\n"
     "9. Язык ответа — русский.\n\n"
     "Формат ответа строго: "
-    "{\"knowledge\": [{\"question\": \"...\", \"answer\": \"...\", \"type\": \"volatile|stable|evergreen\"}]}"
+    "{\"knowledge\": [{\"question\": \"...\", \"answer\": \"...\", \"type\": \"date_based|vote_based\"}]}"
 )
 
 
@@ -104,9 +127,11 @@ def distill_thread(thread: list[dict], chat: dict) -> list[dict]:
         a = (it.get("answer") or "").strip()
         if not q or not a:
             continue
-        ktype = (it.get("type") or "stable").strip().lower()
-        if ktype not in {"volatile", "stable", "evergreen"}:
-            ktype = "stable"
+        if _is_non_answer(a):
+            continue  # model stated "no info" instead of omitting the pair (rule #3)
+        ktype = (it.get("type") or "vote_based").strip().lower()
+        if ktype not in {"date_based", "vote_based"}:
+            ktype = "vote_based"
         out.append(
             {
                 "question": q,
@@ -122,24 +147,19 @@ def distill_thread(thread: list[dict], chat: dict) -> list[dict]:
     return out
 
 
-def distill_chat(
-    username: str,
-    *,
-    limit: int | None = None,
-    min_thread_size: int = 2,
-    write: bool = True,
-) -> list[dict]:
-    """Distill threads of one chat into knowledge units.
+def select_threads(
+    username: str, *, limit: int | None = None, min_thread_size: int = 2
+) -> list[list[dict]]:
+    """The exact thread selection distill_chat will process, exposed so you can
+    inspect *which* threads "the first N" actually refers to before spending
+    tokens on them.
 
-    Args:
-        limit: process at most this many threads (for cheap prototype runs).
-        min_thread_size: skip threads with fewer messages (default 2 = only
-            discussions; set 1 to also distill standalone informative messages).
-        write: also write data/knowledge/<username>.jsonl.
-
-    Threads whose latest message is older than config.INGEST_SINCE are skipped:
+    Threads are in ascending root-msg_id order (oldest root first). Threads
+    whose latest message is older than config.INGEST_SINCE are dropped first:
     those live in the parent-lookback tail and exist only to give reply context
-    to threads that are still active in the trusted window.
+    to threads that are still active in the trusted window. `limit` is applied
+    AFTER that drop, so "first `limit` threads" means first among the survivors,
+    not first overall.
     """
     chat = next((c for c in config.CHATS if c["username"] == username), None)
     if chat is None:
@@ -163,6 +183,27 @@ def distill_chat(
             print(f"[knowledge] {username}: skipped {dropped} threads older than {since.date()}")
     if limit is not None:
         threads = threads[:limit]
+    return threads
+
+
+def distill_chat(
+    username: str,
+    *,
+    limit: int | None = None,
+    min_thread_size: int = 2,
+    write: bool = True,
+) -> list[dict]:
+    """Distill threads of one chat into knowledge units.
+
+    Args:
+        limit: process at most this many threads (for cheap prototype runs).
+            See select_threads() for exactly which threads that means.
+        min_thread_size: skip threads with fewer messages (default 2 = only
+            discussions; set 1 to also distill standalone informative messages).
+        write: also write data/knowledge/<username>.jsonl.
+    """
+    chat = next((c for c in config.CHATS if c["username"] == username), None)
+    threads = select_threads(username, limit=limit, min_thread_size=min_thread_size)
 
     knowledge: list[dict] = []
     for i, thread in enumerate(threads, 1):

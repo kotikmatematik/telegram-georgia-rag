@@ -45,31 +45,49 @@ from src.threads import build_threads
 
 PRECISION_SYSTEM = (
     "Ты — строгий редактор справочной базы знаний о жизни в Грузии. На вход: "
-    "исходный тред Telegram-чата и одна пара «вопрос-ответ», извлечённая из него "
-    "автоматически, с меткой типа. Оцени пару ТОЛЬКО по этому треду.\n\n"
+    "исходный тред Telegram-чата и одна пара «вопрос-ответ», извлечённая из "
+    "него автоматически. Оцени пару ТОЛЬКО по этому треду.\n\n"
+    "⚠️ Тред может содержать НЕСКОЛЬКО параллельных вопросов от разных людей "
+    "вперемешку (собран по времени и реплаям, а не по теме) — определи, какие "
+    "реплики отвечают именно на оцениваемый вопрос. Если тред явно не называет "
+    "деталь (город, дату) — не изобретай её сам по фоновым знаниям о Грузии, "
+    "пиши, что деталь не подтверждена.\n\n"
     "Критерии:\n"
-    "1. faithful — КАЖДОЕ утверждение в ответе реально подтверждается тредом. "
-    "Если в ответе есть детали, которых в треде нет (додумано, обобщено сверх "
-    "сказанного, перепутаны участники) — faithful=false.\n"
-    "2. atomic — ответ про ОДНУ тему. Если склеены разные темы (например «права» "
-    "и «стоматолог») — atomic=false.\n"
-    "3. useful — это долговечная справка, полезная многим (процедуры, документы, "
-    "устройство, общие советы «где/как»). Разовое объявление (продажа вещи, "
-    "билет, пристройство животного, «кто едет Х числа»), «информации нет», или "
-    "пересказ самого вопроса без ответа — useful=false.\n"
-    "4. type_ok — метка типа верна: volatile (меняется со временем: законы, "
-    "правила, налоги, цены, требования к документам, расписания), stable "
-    "(рекомендации и контакты: врач, мастер, магазин, адреса), evergreen "
-    "(история, география, культура, язык). Укажи type_suggested в любом случае.\n\n"
-    "verdict:\n"
-    "  keep — пара точная, атомарная, полезная, тип верный;\n"
-    "  fix  — суть полезна, но есть правимый дефект (лишние детали, неверный "
-    "тип, слегка размыто, стоит разделить);\n"
-    "  drop — не подтверждается тредом, либо не долговечное знание, либо ответа "
-    "по сути нет.\n\n"
-    "Ответь строго JSON: {\"faithful\": bool, \"atomic\": bool, \"useful\": bool, "
-    "\"type_ok\": bool, \"type_suggested\": \"volatile|stable|evergreen\", "
-    "\"verdict\": \"keep|fix|drop\", \"note\": \"кратко, что не так (или пусто)\"}"
+    "1. faithful — каждое утверждение в ответе подтверждается тредом.\n"
+    "2. atomic — ответ про ОДНУ тему.\n"
+    "3. useful — долговечная справка (процедуры, документы, «где/как», "
+    "рекомендации, мнения, конкретные цены на момент ответа). НЕ useful: "
+    "разовое объявление, событие на конкретную дату («открыт ли каньон "
+    "сегодня»), «информации нет», пересказ вопроса. Устареет ли факт со "
+    "временем — НЕ повод для useful=false, для этого есть type=date_based. "
+    "То, что ответ дал ОДИН человек / это его личное мнение / это не "
+    "профессиональный врач / это совет непроверенной квалификации — тоже НЕ "
+    "повод для useful=false: справка от одного источника всё равно полезна, "
+    "консенсус и надёжность источника — это отдельный вопрос ранжирования при "
+    "поиске, а не критерий, входит ли пара в базу знаний вообще. Пример: «Я "
+    "тренер по фитнесу, орбитрек лучше для суставов, чем дорожка» — useful=true "
+    "(это мнение практика по теме вопроса), даже если это не врач и мнение "
+    "пока единственное.\n"
+    "4. type_ok — метка `type` верна:\n"
+    "   - date_based — официально устанавливаемое (законы, налоги, визовые/"
+    "таможенные требования, документы, тарифы) И любая конкретная ЦЕНА/СУММА;\n"
+    "   - vote_based — всё остальное долговечное: рекомендация ГДЕ/У КОГО/"
+    "КАКИМ СПОСОБОМ без суммы в ответе, а также вневременные факты. Например: "
+    "«где обменять валюту» — vote_based; «сколько стоит обменять валюту» — "
+    "date_based (это уже сумма).\n"
+    "   Не требуй date_based только потому что что-то теоретически может "
+    "измениться — это верно почти для всего.\n\n"
+    "verdict — строго следует из полей выше, не отдельное мнение:\n"
+    "  - faithful=false ИЛИ useful=false → всегда drop (это не лечится правкой, "
+    "неважно, что с atomic/type_ok);\n"
+    "  - faithful=true И useful=true И (atomic=false ИЛИ type_ok=false) → fix;\n"
+    "  - faithful=true И atomic=true И useful=true И type_ok=true → keep.\n\n"
+    "Сначала напиши `note` (что не так и какой тип правильный, если что-то не "
+    "так), и только потом остальные поля — они обязаны совпадать с note.\n"
+    "Ответь строго JSON, в этом порядке ключей: "
+    "{\"note\": \"...\", \"faithful\": bool, \"atomic\": bool, \"useful\": bool, "
+    "\"type_ok\": bool, \"type_suggested\": \"date_based|vote_based\", "
+    "\"verdict\": \"keep|fix|drop\"}"
 )
 
 RECALL_SYSTEM = (
@@ -134,19 +152,19 @@ def _load_knowledge(username: str) -> list[dict]:
 
 # --- Pass 1: precision ------------------------------------------------------
 
-def eval_precision(
-    username: str, *, limit: int | None = None, write: bool = True
+def judge_units(
+    units: list[dict], threads_by_root: dict[int, list[dict]], *, label: str = "eval:precision"
 ) -> list[dict]:
-    units = _load_knowledge(username)
-    if limit is not None:
-        units = random.sample(units, min(limit, len(units)))
-    threads = _threads_by_root(username)
+    """Judge a list of knowledge units against their source threads. This is
+    the reusable core of eval_precision — call it directly from a notebook to
+    judge an in-memory batch (e.g. a cheap distill_chat(limit=..., write=False)
+    prototype run) without touching data/knowledge/*.jsonl at all."""
 
     def judge_one(u: dict) -> dict:
-        thread = threads.get(u["root_msg_id"])
+        thread = threads_by_root.get(u["root_msg_id"])
         if thread is None:
-            # Distillation ran on a thread set we can't reproduce (e.g. code or
-            # spam patterns changed since). Skip rather than judge blind.
+            # No matching source thread (e.g. code or spam patterns changed
+            # since, or you're judging a batch build from different threads).
             return {**_unit_ref(u), "verdict": "skip", "note": "исходный тред не найден"}
         user = (
             f"ТРЕД:\n{_thread_text(thread)}\n\n"
@@ -165,7 +183,18 @@ def eval_precision(
             "note": (j.get("note") or "").strip(),
         }
 
-    out = _run_parallel(judge_one, units, label=f"eval:precision {username}")
+    return _run_parallel(judge_one, units, label=label)
+
+
+def eval_precision(
+    username: str, *, limit: int | None = None, write: bool = True
+) -> list[dict]:
+    units = _load_knowledge(username)
+    if limit is not None:
+        units = random.sample(units, min(limit, len(units)))
+    threads = _threads_by_root(username)
+
+    out = judge_units(units, threads, label=f"eval:precision {username}")
 
     if write:
         _dump(config.KNOWLEDGE_DIR / f"{username}.eval.jsonl", out)

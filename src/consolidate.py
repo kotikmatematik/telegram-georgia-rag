@@ -1,5 +1,13 @@
 """Consolidate distilled knowledge: merge near-duplicate Q&A across threads.
 
+⚠️ OUTDATED vs. the current design (see project memory): this collapses each
+cluster down to ONE representative unit, discarding the rest. That doesn't fit
+either consumption mode decided for src/rag.py — date_based wants a
+recency-weighted BLEND of raw candidates (not a single hard "most recent"
+pick), and vote_based wants ALL distinct answers listed, not one winner. This
+module needs a rewrite before it's wired back in; not touched now, still
+parked behind distillation-quality work.
+
 The same recommendation/fact often appears in several threads. We cluster
 knowledge units by embedding similarity and merge each cluster into one unit
 that carries the consensus + recency signals used later for ranking:
@@ -7,10 +15,10 @@ that carries the consensus + recency signals used later for ranking:
   - support_count : how many sources said it (consensus)
   - sources       : all root links with their dates and types
   - date_start/end: time span of the supporting messages (recency)
-  - type          : majority knowledge type (volatile/stable/evergreen)
+  - type          : majority knowledge type (date_based/vote_based)
 
 The representative question/answer is taken from the MOST RECENT source, so a
-volatile fact reflects the latest state.
+date_based fact reflects the latest state.
 
 Run:  uv run python -m src.consolidate
 """
@@ -71,7 +79,7 @@ def consolidate_knowledge(items: list[dict], *, threshold: float = 0.86) -> list
         members.sort(key=lambda m: m.get("date") or "")
         rep = members[-1]  # most recent = representative
         dates = [m.get("date") or "" for m in members if m.get("date")]
-        types = [m.get("type", "stable") for m in members]
+        types = [m.get("type", "vote_based") for m in members]
         out.append(
             {
                 "question": rep["question"],
@@ -81,7 +89,7 @@ def consolidate_knowledge(items: list[dict], *, threshold: float = 0.86) -> list
                 "date_start": min(dates) if dates else "",
                 "date_end": max(dates) if dates else "",
                 "sources": [
-                    {"link": m["root_link"], "date": m.get("date", ""), "type": m.get("type", "stable")}
+                    {"link": m["root_link"], "date": m.get("date", ""), "type": m.get("type", "vote_based")}
                     for m in members
                 ],
                 "chat_username": rep["chat_username"],
