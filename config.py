@@ -45,10 +45,11 @@ EXTRACT_MODEL = "gpt-5.6-luna"
 EXTRACT_REASONING_EFFORT = "low"
 
 # Stage 3: main validation (src/eval_knowledge.py) — one call per THREAD,
-# judging every knowledge unit extracted from it together. Classic model, no
-# reasoning_effort. Revert: JUDGE_MODEL = "gpt-4o".
-JUDGE_MODEL = "gpt-4.1-mini"
-JUDGE_REASONING_EFFORT = None
+# judging every knowledge unit extracted from it together.
+# Tried gpt-5-mini/high (2026-09-12), then this. Revert to the classic model:
+# JUDGE_MODEL = "gpt-4.1-mini", JUDGE_REASONING_EFFORT = None.
+JUDGE_MODEL = "gpt-5.4-mini"
+JUDGE_REASONING_EFFORT = "medium"
 
 # Applying "fix" verdicts (src/fix_knowledge.py: type correction + re-atomize)
 # — cheap classic model, separate from CHAT_MODEL (the distiller) so the two
@@ -69,8 +70,15 @@ REVERIFY_REASONING_EFFORT = "medium"
 # src/store.chat_json() uses this to pick the right call shape per model.
 REASONING_MODELS = {
     "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+    "gpt-5-mini", "gpt-5.4-mini",
     "o1", "o1-mini", "o3", "o3-mini",
 }
+
+# Fixed seed for every LLM call (src/store.chat_json) — the one determinism
+# lever that works uniformly: temperature=0 is rejected outright by the
+# reasoning models above, so `seed` is what "give the same answer again"
+# actually relies on across the whole pipeline.
+LLM_SEED = 0
 
 # --- Vector DB ---
 COLLECTION_NAME = "georgia_chats"

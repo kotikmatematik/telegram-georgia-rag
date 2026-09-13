@@ -29,6 +29,8 @@ this is still a prototype step downstream of eval_knowledge.
 """
 from __future__ import annotations
 
+import json
+
 import config
 from src.eval_knowledge import _run_parallel
 from src.knowledge import _thread_text
@@ -54,7 +56,7 @@ def _atomize_one(unit: dict) -> list[dict]:
     data = chat_json(
         config.FIX_MODEL, ATOMIZE_SYSTEM,
         f"Вопрос: {unit['question']}\nОтвет: {unit['answer']}",
-        temperature=0.1,
+        temperature=0,
     )
     pairs = data.get("pairs", [])
     out = [
@@ -150,3 +152,15 @@ def fix_batch(
         f"fixed={len(fixed)} dropped={len(dropped)}"
     )
     return {"kept": kept, "fixed": fixed, "dropped": dropped, "rescued": rescued}
+
+
+def save_fixed(username: str, result: dict[str, list[dict]]) -> None:
+    """Write the final, corrected knowledge (kept + fixed from fix_batch's
+    result) to data/knowledge/<username>.fixed.jsonl — this is the file meant
+    to feed retrieve/rag downstream, once that's wired up."""
+    final_knowledge = result["kept"] + result["fixed"]
+    out_path = config.KNOWLEDGE_DIR / f"{username}.fixed.jsonl"
+    with out_path.open("w", encoding="utf-8") as f:
+        for u in final_knowledge:
+            f.write(json.dumps(u, ensure_ascii=False) + "\n")
+    print(f"[fix] saved {len(final_knowledge)} items -> {out_path}")

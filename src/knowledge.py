@@ -225,7 +225,7 @@ def distill_thread(thread: list[dict], chat: dict) -> list[dict]:
 
     data = chat_json(
         config.EXTRACT_MODEL, SYSTEM_PROMPT, user_content,
-        temperature=0.1, reasoning_effort=config.EXTRACT_REASONING_EFFORT,
+        temperature=0, reasoning_effort=config.EXTRACT_REASONING_EFFORT,
     )
     return _items_to_units(data.get("knowledge", []), thread, chat)
 
@@ -240,7 +240,7 @@ def distill_thread_one_stage(thread: list[dict], chat: dict) -> list[dict]:
     """
     data = chat_json(
         config.EXTRACT_MODEL, SYSTEM_PROMPT, _thread_text_with_ids(thread),
-        temperature=0.1, reasoning_effort=config.EXTRACT_REASONING_EFFORT,
+        temperature=0, reasoning_effort=config.EXTRACT_REASONING_EFFORT,
     )
     return _items_to_units(data.get("knowledge", []), thread, chat)
 

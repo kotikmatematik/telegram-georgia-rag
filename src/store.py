@@ -26,11 +26,17 @@ def chat_json(
 ) -> dict:
     """One JSON-mode chat call, picking the right parameter shape for the model.
 
-    Reasoning-family models (config.REASONING_MODELS: gpt-5.6-*, o1/o3-*) only
-    accept the default `temperature` and use `reasoning_effort` instead;
-    classic chat models (gpt-4o*, gpt-4.1*) are the other way round. Callers
-    just pass both and this picks what's actually sent, so swapping a model in
-    config.py doesn't require touching call sites.
+    Reasoning-family models (config.REASONING_MODELS: gpt-5.6-*, gpt-5-mini,
+    gpt-5.4-mini, o1/o3-*) reject a custom `temperature` outright (API error —
+    only their default is allowed) and use `reasoning_effort` instead; classic
+    chat models (gpt-4o*, gpt-4.1*) take `temperature`, no `reasoning_effort`.
+    Callers just pass both and this picks what's actually sent, so swapping a
+    model in config.py doesn't require touching call sites.
+
+    `config.LLM_SEED` is always sent (every tested model accepts `seed`,
+    including the reasoning ones that reject `temperature`) — it's the one
+    lever for "give me the same answer again" that works everywhere, since
+    temperature=0 isn't available on reasoning models at all.
 
     Returns the parsed JSON object, or {} if the model didn't return valid JSON.
     """
@@ -38,6 +44,7 @@ def chat_json(
     kwargs: dict = {
         "model": model,
         "response_format": {"type": "json_object"},
+        "seed": config.LLM_SEED,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -46,7 +53,7 @@ def chat_json(
     if model in config.REASONING_MODELS:
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
-        # no `temperature`: these models only support the API default (1).
+        # no `temperature`: these models reject anything but their default.
     else:
         kwargs["temperature"] = temperature
 
