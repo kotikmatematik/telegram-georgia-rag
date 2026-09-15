@@ -154,11 +154,34 @@ def fix_batch(
     return {"kept": kept, "fixed": fixed, "dropped": dropped, "rescued": rescued}
 
 
+def _dedup_key(u: dict) -> tuple:
+    return (u["root_msg_id"], u["question"].strip().lower(), u["answer"].strip().lower())
+
+
+def drop_thread_duplicates(units: list[dict]) -> list[dict]:
+    """Drop exact-duplicate knowledge extracted from the SAME thread (same
+    root_msg_id + same question + same answer, case-insensitive) — keeps the
+    first occurrence. A same-root duplicate can only be a distillation
+    artifact (re-extracting the same pair twice), never a genuine second
+    source, so dropping it outright is safe."""
+    seen: set[tuple] = set()
+    out = []
+    for u in units:
+        key = _dedup_key(u)
+        if key in seen:
+            print(f"[fix] dropping duplicate: {u.get('root_link')}  Q: {u['question']}")
+            continue
+        seen.add(key)
+        out.append(u)
+    return out
+
+
 def save_fixed(username: str, result: dict[str, list[dict]]) -> None:
     """Write the final, corrected knowledge (kept + fixed from fix_batch's
-    result) to data/knowledge/<username>.fixed.jsonl — this is the file meant
-    to feed retrieve/rag downstream, once that's wired up."""
-    final_knowledge = result["kept"] + result["fixed"]
+    result) to data/knowledge/<username>.fixed.jsonl — this is the file that
+    feeds indexing (src/index.py) downstream."""
+    final_knowledge = drop_thread_duplicates(result["kept"] + result["fixed"])
+
     out_path = config.KNOWLEDGE_DIR / f"{username}.fixed.jsonl"
     with out_path.open("w", encoding="utf-8") as f:
         for u in final_knowledge:
