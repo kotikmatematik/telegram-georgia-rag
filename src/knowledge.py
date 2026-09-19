@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 
 import config
+from src.ingest import _chat_link
 from src.preprocess import _load_raw, _parse_dt
 from src.spam import filter_spam
 from src.store import chat_json
@@ -49,6 +50,28 @@ _NON_ANSWER_RX = re.compile("|".join(_NON_ANSWER_PATTERNS), re.IGNORECASE)
 def _is_non_answer(answer: str) -> bool:
     return bool(_NON_ANSWER_RX.search(answer))
 
+
+# Backstop for rule #6: mask personal contacts (phone numbers, @handles) in
+# `answer` mechanically, same reasoning as _is_non_answer above — prompt
+# instructions alone aren't reliable enough on their own (see project
+# memory). A public chat/channel link is left alone (not a personal
+# contact) — only phone-number-shaped digit runs and @handles are masked.
+_CONTACT_PLACEHOLDER = "контакт есть в источнике"
+_PHONE_RX = re.compile(r"\+?\(?\d[\d\-\s\(\)]{5,}\d")
+_TG_HANDLE_RX = re.compile(r"@\w{4,}")
+
+
+def _mask_contacts(answer: str) -> str:
+    def _phone_repl(m: re.Match) -> str:
+        digits = re.sub(r"\D", "", m.group(0))
+        # >=9 digits: matches Georgian/Russian mobile numbers, not dates
+        # (e.g. "2025-03-01" is only 8 digits) or short incidental numbers.
+        return _CONTACT_PLACEHOLDER if len(digits) >= 9 else m.group(0)
+
+    answer = _PHONE_RX.sub(_phone_repl, answer)
+    answer = _TG_HANDLE_RX.sub(_CONTACT_PLACEHOLDER, answer)
+    return answer
+
 # Russian on purpose: source chats and the target assistant are Russian-speaking.
 SYSTEM_PROMPT = (
     "Ты извлекаешь полезные ДОЛГОВЕЧНЫЕ знания о жизни в Грузии из переписок "
@@ -73,7 +96,11 @@ SYSTEM_PROMPT = (
     "ответили только «100 лари» — вопрос должен быть «сколько стоит "
     "гравировка?», а НЕ «где сделать гравировку?» (на это не ответили).\n"
     "6. `answer` — связный практичный ответ; если мнения расходятся — отрази "
-    "это. Это мнения чата, не официальный источник.\n"
+    "это. Это мнения чата, не официальный источник. НЕ включай в `answer` "
+    "номера телефонов и личные контакты (@юзернейм, ссылку на личный профиль) "
+    "— вместо этого пиши «контакт есть в источнике по ссылке» (ссылка на тред "
+    "добавляется отдельно, отдельно её не пиши). Ссылку на ПУБЛИЧНЫЙ чат/канал "
+    "(не личный профиль) — это не контакт, оставляй как есть.\n"
     "7. `type` — как эту пару потом использовать при ответе:\n"
     "   - \"date_based\" — официально устанавливаемое (законы, налоги, визовые/"
     "таможенные требования, документы, тарифы) И любая конкретная ЦЕНА/СУММА "
@@ -92,12 +119,18 @@ SYSTEM_PROMPT = (
     "он явно назван в треде — никогда не угадывай по намёкам (улицы, районы "
     "без названия города погоды не делают). Если знание общегрузинское "
     "(визы, налоги, ИП, общий совет не про конкретное место) — city: null.\n"
-    "9. Тред может дать несколько пар или ни одной. Если долговечного знания "
+    "9. `source_msg_id` — id (число) ОДНОГО сообщения из треда (у каждой "
+    "строки в треде есть свой [id] в начале), где был задан САМ ВОПРОС (не "
+    "ответ на него) — так по ссылке видно вопрос и можно пролистать вниз все "
+    "ответы на него. В треде до 50 сообщений — это НЕ обязательно первое "
+    "сообщение треда, найди именно то, где спросили.\n"
+    "10. Тред может дать несколько пар или ни одной. Если долговечного знания "
     "нет — верни {\"knowledge\": []}.\n"
-    "10. Язык ответа — русский.\n\n"
+    "11. Язык ответа — русский.\n\n"
     "Формат ответа строго: "
     "{\"knowledge\": [{\"question\": \"...\", \"answer\": \"...\", "
-    "\"type\": \"date_based|vote_based\", \"city\": \"Тбилиси|null\"}]}"
+    "\"type\": \"date_based|vote_based\", \"city\": \"Тбилиси|null\", "
+    "\"source_msg_id\": 12345}]}"
 )
 
 
@@ -172,6 +205,7 @@ def _items_to_units(items: list[dict], thread: list[dict], chat: dict) -> list[d
     root = thread[0]
     # latest activity in the thread — used later for recency weighting
     thread_date = thread[-1].get("date") or root.get("date") or ""
+    thread_ids = {m["msg_id"] for m in thread}
     out = []
     for it in items:
         q = (it.get("question") or "").strip()
@@ -180,12 +214,27 @@ def _items_to_units(items: list[dict], thread: list[dict], chat: dict) -> list[d
             continue
         if _is_non_answer(a):
             continue  # model stated "no info" instead of omitting the pair (rule #3)
+        a = _mask_contacts(a)  # backstop for rule #6: strip phone numbers / @handles
         ktype = (it.get("type") or "vote_based").strip().lower()
         if ktype not in {"date_based", "vote_based"}:
             ktype = "vote_based"
         city = (it.get("city") or "").strip() or None
         if city and city.lower() in {"null", "none", "-"}:
             city = None  # model sometimes writes the literal word instead of JSON null
+
+        # rule #9: which message the answer actually came from — NOT the same
+        # as root_msg_id in a long (up to 50-msg) thread, where the root can
+        # be unrelated to a given pair. root_msg_id/root_link stay pointing
+        # at the thread itself (used everywhere for grouping/judging); this
+        # is a separate, more precise citation. Falls back to the thread root
+        # if the model omits it or names a message outside this thread.
+        try:
+            source_msg_id = int(it.get("source_msg_id"))
+        except (TypeError, ValueError):
+            source_msg_id = None
+        if source_msg_id not in thread_ids:
+            source_msg_id = root["msg_id"]
+
         out.append(
             {
                 "question": q,
@@ -197,6 +246,8 @@ def _items_to_units(items: list[dict], thread: list[dict], chat: dict) -> list[d
                 "chat_title": chat["title"],
                 "root_msg_id": root["msg_id"],
                 "root_link": root["link"],
+                "source_msg_id": source_msg_id,
+                "source_link": _chat_link(chat, source_msg_id),
             }
         )
     return out
@@ -249,18 +300,25 @@ def distill_thread_one_stage(thread: list[dict], chat: dict) -> list[dict]:
 
 
 def select_threads(
-    username: str, *, limit: int | None = None, min_thread_size: int = 2
+    username: str,
+    *,
+    limit: int | None = None,
+    min_thread_size: int = 2,
+    since=None,
 ) -> list[list[dict]]:
     """The exact thread selection distill_chat will process, exposed so you can
     inspect *which* threads "the first N" actually refers to before spending
     tokens on them.
 
     Threads are in ascending root-msg_id order (oldest root first). Threads
-    whose latest message is older than config.INGEST_SINCE are dropped first:
-    those live in the parent-lookback tail and exist only to give reply context
-    to threads that are still active in the trusted window. `limit` is applied
-    AFTER that drop, so "first `limit` threads" means first among the survivors,
-    not first overall.
+    whose latest message is older than `since` (default: config.INGEST_SINCE)
+    are dropped first: those live in the parent-lookback tail and exist only
+    to give reply context to threads that are still active in the trusted
+    window. Pass `since` explicitly to select a different (e.g. more recent,
+    overlap-adjusted) cutoff — see src/update_knowledge.py, which uses this to
+    pick only threads worth re-checking on an incremental run. `limit` is
+    applied AFTER the date drop, so "first `limit` threads" means first among
+    the survivors, not first overall.
     """
     chat = next((c for c in config.CHATS if c["username"] == username), None)
     if chat is None:
@@ -271,7 +329,8 @@ def select_threads(
         raise SystemExit(f"{raw_path} not found — run src.ingest first")
 
     msgs, _ = filter_spam(_load_raw(raw_path)) if config.FILTER_SPAM else (_load_raw(raw_path), [])
-    since = config.ingest_since_dt()
+    if since is None:
+        since = config.ingest_since_dt()
     threads = [t for t in build_threads(msgs) if len(t) >= min_thread_size]
     if since is not None:
         before = len(threads)
@@ -287,6 +346,18 @@ def select_threads(
     return threads
 
 
+def distill_threads(threads: list[list[dict]], chat: dict) -> list[dict]:
+    """Distill an already-selected list of threads (shared by distill_chat and
+    the incremental update path in src/update_knowledge.py, which only wants
+    to (re)distill a subset, not the whole chat)."""
+    knowledge: list[dict] = []
+    for i, thread in enumerate(threads, 1):
+        knowledge.extend(distill_thread(thread, chat))
+        if i % 25 == 0 or i == len(threads):
+            print(f"[knowledge] {chat['username']}: {i}/{len(threads)} threads -> {len(knowledge)} items")
+    return knowledge
+
+
 def distill_chat(
     username: str,
     *,
@@ -294,7 +365,10 @@ def distill_chat(
     min_thread_size: int = 2,
     write: bool = True,
 ) -> list[dict]:
-    """Distill threads of one chat into knowledge units.
+    """Distill ALL selected threads of one chat into knowledge units (full,
+    from-scratch run — overwrites data/knowledge/<username>.jsonl entirely).
+    For incremental (re-distill only recently-active threads, keep the rest
+    untouched) use src.update_knowledge instead.
 
     Args:
         limit: process at most this many threads (for cheap prototype runs).
@@ -305,12 +379,7 @@ def distill_chat(
     """
     chat = next((c for c in config.CHATS if c["username"] == username), None)
     threads = select_threads(username, limit=limit, min_thread_size=min_thread_size)
-
-    knowledge: list[dict] = []
-    for i, thread in enumerate(threads, 1):
-        knowledge.extend(distill_thread(thread, chat))
-        if i % 25 == 0 or i == len(threads):
-            print(f"[knowledge] {username}: {i}/{len(threads)} threads -> {len(knowledge)} items")
+    knowledge = distill_threads(threads, chat)
 
     if write:
         out_path = config.KNOWLEDGE_DIR / f"{username}.jsonl"

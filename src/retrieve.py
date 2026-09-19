@@ -10,7 +10,11 @@ import config
 from src.store import embed_texts, get_collection
 
 
-def search(query: str, k: int = config.TOP_K) -> list[dict]:
+def search(query: str, k: int = config.TOP_K, *, min_score: float = config.RETRIEVAL_MIN_SCORE) -> list[dict]:
+    """Top-k by cosine score, then drop anything below min_score — see
+    config.RETRIEVAL_MIN_SCORE for why: below that, hits are noise, not
+    real matches (measured empirically, not guessed). Pass min_score=0 to
+    get the raw top-k back (e.g. for debugging what was filtered out)."""
     collection = get_collection()
     q_emb = embed_texts([query])[0]
     res = collection.query(query_embeddings=[q_emb], n_results=k)
@@ -19,7 +23,9 @@ def search(query: str, k: int = config.TOP_K) -> list[dict]:
     metas = res["metadatas"][0]
     dists = res["distances"][0]
     for doc, meta, dist in zip(docs, metas, dists):
-        hits.append({"text": doc, "meta": meta, "score": 1 - dist})
+        score = 1 - dist
+        if score >= min_score:
+            hits.append({"text": doc, "meta": meta, "score": score})
     return hits
 
 

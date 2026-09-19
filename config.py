@@ -27,9 +27,46 @@ TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 TELEGRAM_PHONE = os.getenv("TELEGRAM_PHONE", "")
 
+# --- Azure OpenAI (temporary alt. billing path, e.g. borrowed startup credits) ---
+# Same models, same Chat Completions API + Structured Outputs — just routed
+# through Azure's endpoint instead of OpenAI's directly, so nothing else in
+# the pipeline needs to change. Data (data/raw, data/knowledge, chroma_db)
+# is always local regardless of which endpoint produced it — there is
+# nothing to migrate back when this access goes away, just flip
+# USE_AZURE_OPENAI back to False and everything resumes hitting OpenAI
+# directly with OPENAI_API_KEY.
+#
+# Uses Azure's newer v1-compatible surface (endpoint ending in /openai/v1) —
+# that means the plain OpenAI() client works with just base_url + api_key, no
+# AzureOpenAI class / dated api_version needed (see src/store.py).
+USE_AZURE_OPENAI = True
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")   # https://<resource>.openai.azure.com/openai/v1
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
+# Azure calls a deployed model by whatever "deployment name" whoever set it up
+# chose — not guaranteed to equal the model name. Only fill this in if your
+# friend's deployment names differ from the model names below; empty = assume
+# identical (ask them to name deployments after the model, it's simplest).
+AZURE_DEPLOYMENT_MAP: dict[str, str] = {}
+
+
+def azure_deployment(model: str) -> str:
+    """Translate an OpenAI model name to its Azure deployment name — a no-op
+    (returns `model` unchanged) unless USE_AZURE_OPENAI + AZURE_DEPLOYMENT_MAP
+    say otherwise, so this is always safe to call regardless of mode."""
+    if not USE_AZURE_OPENAI:
+        return model
+    return AZURE_DEPLOYMENT_MAP.get(model, model)
+
 # --- OpenAI models ---
 EMBED_MODEL = "text-embedding-3-small"
 CHAT_MODEL = "gpt-4o-mini"  # kept as the "old model" reference value for reverts below
+
+# Final answer generation (src/rag.py) — the live, user-facing step. Reasoning
+# effort kept low: this runs synchronously per user question (unlike the
+# offline pipeline stages), so latency matters more here.
+# Revert: GENERATION_MODEL = CHAT_MODEL, GENERATION_REASONING_EFFORT = None.
+GENERATION_MODEL = "gpt-5.6-luna"
+GENERATION_REASONING_EFFORT = "low"
 
 # --- Distillation stage 1 (src/knowledge.py), split into two sequential calls ---
 # 1a splits the raw thread into semantic branches (message ids only, so the
@@ -53,8 +90,10 @@ JUDGE_REASONING_EFFORT = "medium"
 
 # Applying "fix" verdicts (src/fix_knowledge.py: type correction + re-atomize)
 # — cheap classic model, separate from CHAT_MODEL (the distiller) so the two
-# can be tuned independently.
+# can be tuned independently. Tried gpt-5.4-mini (same as JUDGE_MODEL) on
+# 2026-09-16 — reverted: 2-3x pricier for no real benefit at this stage.
 FIX_MODEL = "gpt-4.1-mini"
+FIX_REASONING_EFFORT = None
 
 # Stage 4 (src/fix_knowledge.py): independent recheck of knowledge stage 3
 # marked invalid/for removal — a genuine third model, deliberately NOT shown
@@ -111,22 +150,53 @@ def ingest_fetch_floor_dt() -> datetime | None:
     return since - timedelta(days=INGEST_PARENT_LOOKBACK_DAYS)
 
 
+# --- Incremental knowledge updates (src/update_knowledge.py) ---
+# Weekly-ish re-run: threads whose latest activity is older than
+# (processed_until - REPROCESS_OVERLAP_DAYS) are left untouched; anything more
+# recent gets fully re-distilled + re-validated and REPLACES its old knowledge
+# (not appended). The overlap exists because a thread can go quiet and then
+# get a late straggler reply — measured on helpgeorgia: of threads quiet for
+# >=1 day, 20.3% still get another reply later; >=3 days, only 8.6%. 3 days
+# was picked as the balance between catching most late replies and not
+# re-processing (and re-spending tokens on) too much every run.
+REPROCESS_OVERLAP_DAYS = 3
+
+
 # --- Pipeline parameters ---
 FILTER_SPAM = True           # drop spam (money / drugs / ads / pets) before chunking; questions are kept
 CHUNK_MAX_GAP_MINUTES = 10   # if the gap between messages exceeds this, start a new chunk
+# Hard cap on a time-burst thread (src/threads.py) — prevents very busy chats
+# (near-continuous activity, no natural gaps) from chaining thousands of
+# unrelated messages into one giant "thread". Does not affect reply-based
+# links, which are never capped.
+THREAD_MAX_BURST_SIZE = 50
 CHUNK_MAX_CHARS = 1500       # max chunk size in characters
 CHUNK_MIN_CHARS = 40         # drop chunks shorter than this (low signal)
 REPLY_CHAIN_MAX_MSGS = 50    # follow full reply chains, but stop after this many ancestors (safety ceiling)
 REPLY_CONTEXT_MAX_CHARS = 2000  # cap total quoted reply context per chunk (each ancestor pulls its whole time-burst, bounded here)
 TOP_K = 8                    # how many chunks to feed into the LLM context
+# Below this cosine score a hit is noise, not a real match — measured on
+# helpgeorgia: a genuine match scores 0.7+ and drops sharply after; a query
+# with NO real answer in the base still returns hits, but all clustered
+# 0.38-0.50 with no clear top pick. 0.5 cuts that noise while keeping
+# legitimate secondary sources (e.g. a real second source scored 0.57).
+RETRIEVAL_MIN_SCORE = 0.5
 EMBED_BATCH = 100            # batch size for embedding requests
 
 # --- Chats ---
-# `username` is used to build t.me/<username>/<msg_id> source links;
-# `chat_id` is used by Telethon to actually fetch the chat history.
+# `username` is used to build t.me/<username>/<msg_id> source links (and as
+# the internal slug for data/raw/<username>.jsonl etc. — for a private chat
+# it's just that slug, not a real Telegram @username); `chat_id` is used by
+# Telethon to actually fetch the chat history. `private: True` marks a closed
+# chat with no public @username — src/ingest.py then builds source links as
+# t.me/c/<internal_id>/<msg_id> instead, which only opens for members of that
+# chat (Telegram's restriction, not ours) — see src/ingest.py::_chat_link.
+# Fetching a private chat requires the Telethon session's own account
+# (config.TELEGRAM_PHONE) to already be a member — it can't be added "blind".
 CHATS = [
     {"username": "helpgeorgia", "chat_id": -1001452236047, "title": "Взаимопомощь. Грузия"},
     {"username": "ipgeorgiachat", "chat_id": -1001670908431, "title": "ИП/Бизнес Грузия"},
+    {"username": "nogotochki", "chat_id": -1001318697228, "title": "Ноготочки", "private": True},
     # Uncomment to add more chats when scaling up:
     # {"username": "paravaingeorgia", "chat_id": -1001512786455, "title": "Получение водительских прав в Грузии"},
     # {"username": "mygeorgia_chat", "chat_id": -1001486751358, "title": "ГРУЗИЯ ЧАТ"},

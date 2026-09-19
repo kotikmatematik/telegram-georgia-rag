@@ -20,6 +20,19 @@ from telethon import TelegramClient
 import config
 
 
+def _chat_link(chat: dict, msg_id: int) -> str:
+    """A closed chat (chat["private"]=True, no public @username) can't use the
+    normal t.me/<username>/<id> scheme — that requires a public username.
+    Use the t.me/c/<internal_id>/<id> form instead. Note this link only opens
+    for people who are already members of that chat (Telegram enforces this,
+    not us) — it's still useful as a citation for whoever runs this pipeline,
+    just not a universally clickable source like the public-chat links."""
+    if chat.get("private"):
+        internal_id = str(abs(chat["chat_id"]))[3:]  # strip the "-100" channel prefix
+        return f"https://t.me/c/{internal_id}/{msg_id}"
+    return f"https://t.me/{chat['username']}/{msg_id}"
+
+
 def _msg_to_record(msg, chat) -> dict | None:
     """Convert a Telethon message into a flat record. None means skip it."""
     text = (msg.message or "").strip()
@@ -39,7 +52,7 @@ def _msg_to_record(msg, chat) -> dict | None:
         "reply_to": msg.reply_to_msg_id,
         "chat_username": chat["username"],
         "chat_title": chat["title"],
-        "link": f"https://t.me/{chat['username']}/{msg.id}",
+        "link": _chat_link(chat, msg.id),
     }
 
 

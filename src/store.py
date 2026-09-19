@@ -15,9 +15,22 @@ _chroma: chromadb.ClientAPI | None = None
 def openai_client() -> OpenAI:
     global _openai
     if _openai is None:
-        if not config.OPENAI_API_KEY:
-            raise SystemExit("OPENAI_API_KEY is not set in .env")
-        _openai = OpenAI(api_key=config.OPENAI_API_KEY)
+        if config.USE_AZURE_OPENAI:
+            if not (config.AZURE_OPENAI_ENDPOINT and config.AZURE_OPENAI_API_KEY):
+                raise SystemExit(
+                    "AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY are not set in .env "
+                    "(config.USE_AZURE_OPENAI is True)"
+                )
+            # Azure's v1-compatible surface: plain OpenAI client, just a
+            # different base_url — no AzureOpenAI class / api_version needed.
+            _openai = OpenAI(
+                api_key=config.AZURE_OPENAI_API_KEY,
+                base_url=config.AZURE_OPENAI_ENDPOINT,
+            )
+        else:
+            if not config.OPENAI_API_KEY:
+                raise SystemExit("OPENAI_API_KEY is not set in .env")
+            _openai = OpenAI(api_key=config.OPENAI_API_KEY)
     return _openai
 
 
@@ -42,7 +55,7 @@ def chat_json(
     """
     client = openai_client()
     kwargs: dict = {
-        "model": model,
+        "model": config.azure_deployment(model),
         "response_format": {"type": "json_object"},
         "seed": config.LLM_SEED,
         "messages": [
@@ -70,7 +83,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     out: list[list[float]] = []
     for i in range(0, len(texts), config.EMBED_BATCH):
         batch = texts[i : i + config.EMBED_BATCH]
-        resp = client.embeddings.create(model=config.EMBED_MODEL, input=batch)
+        resp = client.embeddings.create(model=config.azure_deployment(config.EMBED_MODEL), input=batch)
         out.extend(d.embedding for d in resp.data)
     return out
 

@@ -56,7 +56,7 @@ def _atomize_one(unit: dict) -> list[dict]:
     data = chat_json(
         config.FIX_MODEL, ATOMIZE_SYSTEM,
         f"Вопрос: {unit['question']}\nОтвет: {unit['answer']}",
-        temperature=0,
+        temperature=0, reasoning_effort=config.FIX_REASONING_EFFORT,
     )
     pairs = data.get("pairs", [])
     out = [

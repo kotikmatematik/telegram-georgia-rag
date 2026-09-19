@@ -36,10 +36,28 @@ class _UnionFind:
             self.parent[ra] = rb
 
 
-def build_threads(msgs: list[dict], *, gap_minutes: float = None) -> list[list[dict]]:
+def build_threads(
+    msgs: list[dict], *, gap_minutes: float = None, max_burst_size: int = None
+) -> list[list[dict]]:
     """Group messages into threads. Each thread is sorted chronologically;
-    threads are ordered by their root (lowest) message id."""
+    threads are ordered by their root (lowest) message id.
+
+    max_burst_size caps a component two ways: (a) a single time-burst can only
+    chain max_burst_size messages via relation (2) before starting a fresh
+    chunk, and (b) as a final backstop, ANY resulting component still over
+    max_burst_size (bursts bridged back together via reply links crossing
+    chunk boundaries — measured on nogotochki: capping (a) alone barely
+    helped, 58% of its messages have a reply_to, so replies kept re-stitching
+    separately-capped burst chunks back into one blob) is split into
+    chronological sub-groups of at most max_burst_size. Needed for very
+    high-traffic chats: on nogotochki (a busy private chat, 42k+ messages),
+    even a 30-SECOND gap still chained 28% of all messages into one component
+    — the chat is close to continuously active, so shrinking the gap alone
+    never isolates real discussions, it just delays where the chaining
+    happens.
+    """
     gap_minutes = config.CHUNK_MAX_GAP_MINUTES if gap_minutes is None else gap_minutes
+    max_burst_size = config.THREAD_MAX_BURST_SIZE if max_burst_size is None else max_burst_size
     by_id = {m["msg_id"]: m for m in msgs}
     uf = _UnionFind(list(by_id))
 
@@ -49,7 +67,8 @@ def build_threads(msgs: list[dict], *, gap_minutes: float = None) -> list[list[d
         if parent in by_id:
             uf.union(m["msg_id"], parent)
 
-    # (2) time-bursts: union all members of each burst
+    # (2) time-bursts: union all members of each burst, capped in chronological
+    # chunks of at most max_burst_size (burst members are already time-ordered).
     burst_map = _time_bursts(msgs, gap_minutes * 60)
     seen_bursts: set[int] = set()
     for burst in burst_map.values():
@@ -57,17 +76,75 @@ def build_threads(msgs: list[dict], *, gap_minutes: float = None) -> list[list[d
         if key in seen_bursts:
             continue
         seen_bursts.add(key)
-        for m in burst[1:]:
-            uf.union(burst[0]["msg_id"], m["msg_id"])
+        for i in range(0, len(burst), max_burst_size):
+            chunk = burst[i : i + max_burst_size]
+            for m in chunk[1:]:
+                uf.union(chunk[0]["msg_id"], m["msg_id"])
 
     # collect components
     comps: dict[int, list[dict]] = {}
     for m in msgs:
         comps.setdefault(uf.find(m["msg_id"]), []).append(m)
 
-    threads = [sorted(c, key=lambda x: x["msg_id"]) for c in comps.values()]
+    threads: list[list[dict]] = []
+    for c in comps.values():
+        c = sorted(c, key=lambda x: x["msg_id"])
+        if len(c) <= max_burst_size:
+            threads.append(c)
+        else:
+            # Final backstop: reply links can re-stitch separately-capped
+            # burst chunks back together (see docstring). Split without
+            # blindly severing a real reply conversation where avoidable.
+            threads.extend(_split_oversized(c, max_burst_size))
     threads.sort(key=lambda t: t[0]["msg_id"])
     return threads
+
+
+def _split_oversized(component: list[dict], max_size: int) -> list[list[dict]]:
+    """Split an over-cap component (see build_threads) in a reply-aware way:
+    a reply-connected sub-conversation (>=2 messages, purely via reply_to —
+    time-bursts are ignored here) is treated as an ATOMIC block that's never
+    torn across two output threads, as long as it fits under max_size on its
+    own. Blocks (islands and lone, reply-isolated messages) are then packed
+    chronologically into threads of at most max_size — so unrelated
+    time-adjacent messages still get grouped the same as before, they just
+    can't split a reply island in half. Only a reply island that's STILL over
+    max_size by itself (rare — measured once, an 81-message chain, on
+    nogotochki's 42k+ messages) gets chopped chronologically, and even then
+    only within that island's own genuinely-connected messages, not mixed
+    with unrelated neighbours.
+    """
+    ids_here = {m["msg_id"] for m in component}
+    reply_uf = _UnionFind([m["msg_id"] for m in component])
+    for m in component:
+        parent = m.get("reply_to")
+        if parent in ids_here:
+            reply_uf.union(m["msg_id"], parent)
+
+    groups: dict[int, list[dict]] = {}
+    for m in component:
+        groups.setdefault(reply_uf.find(m["msg_id"]), []).append(m)
+
+    blocks = [sorted(g, key=lambda x: x["msg_id"]) for g in groups.values()]
+    blocks.sort(key=lambda b: b[0]["msg_id"])
+
+    out: list[list[dict]] = []
+    bucket: list[dict] = []
+    for block in blocks:
+        if bucket and len(bucket) + len(block) > max_size:
+            out.append(bucket)
+            bucket = []
+        if len(block) > max_size:
+            if bucket:
+                out.append(bucket)
+                bucket = []
+            for i in range(0, len(block), max_size):
+                out.append(block[i : i + max_size])
+        else:
+            bucket.extend(block)
+    if bucket:
+        out.append(bucket)
+    return out
 
 
 def main() -> None:
