@@ -1,4 +1,4 @@
-"""Search for relevant chunks by query (for debugging and reuse).
+"""Search for relevant knowledge units by query (for debugging and reuse).
 
 Run:  uv run python -m src.retrieve "как открыть ип в грузии"
 """

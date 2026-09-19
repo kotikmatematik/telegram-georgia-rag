@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 import config
 from src.eval_knowledge import judge_units
 from src.fix_knowledge import drop_thread_duplicates, fix_batch
-from src.knowledge import distill_threads, select_threads
+from src.knowledge import _mask_contacts, distill_threads, select_threads
 
 
 def _state_path(username: str):
@@ -113,6 +113,8 @@ def update_knowledge(username: str) -> None:
     judged = judge_units(fresh_units, threads_by_root, label=f"update:eval {username}")
     result = fix_batch(fresh_units, judged, threads_by_root)
     fresh_fixed = drop_thread_duplicates(result["kept"] + result["fixed"])
+    for u in fresh_fixed:  # same masking as save_fixed — contacts never reach .fixed.jsonl
+        u["answer"] = _mask_contacts(u["answer"])
 
     # Raw (pre-validation) file — mirrors distill_chat's output, kept in sync.
     raw_path = config.KNOWLEDGE_DIR / f"{username}.jsonl"

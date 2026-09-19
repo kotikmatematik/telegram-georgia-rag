@@ -359,57 +359,6 @@ def _report_recall(rows: list[dict], *, total_empty: int) -> None:
         print(f"    missed: {r['missed']}")
 
 
-# --- Calibration: trust the judge only after checking it against yourself ----
-
-def sample_for_calibration(
-    username: str, *, n: int = 12, seed: int = 0
-) -> list[dict]:
-    """Pick a spread of units (by judge verdict) with their source thread text,
-    for you to hand-label keep/fix/drop in the notebook. Requires that
-    eval_precision has been run (reads <chat>.eval.jsonl)."""
-    eval_path = config.KNOWLEDGE_DIR / f"{username}.eval.jsonl"
-    if not eval_path.exists():
-        raise SystemExit(f"{eval_path} not found — run eval_precision first")
-    with eval_path.open(encoding="utf-8") as f:
-        rows = [json.loads(line) for line in f if line.strip()]
-    threads = _threads_by_root(username)
-
-    rnd = random.Random(seed)
-    by_verdict: dict[str, list[dict]] = {}
-    for r in rows:
-        by_verdict.setdefault(r["verdict"], []).append(r)
-    picked: list[dict] = []
-    per = max(1, n // max(1, len(by_verdict)))
-    for group in by_verdict.values():
-        picked.extend(rnd.sample(group, min(per, len(group))))
-    picked = picked[:n]
-
-    for r in picked:
-        t = threads.get(r["root_msg_id"])
-        r["thread_text"] = _thread_text(t) if t else ""
-    return picked
-
-
-def calibration_report(picked: list[dict], manual: dict[int, str]) -> None:
-    """Compare your labels to the judge's. `manual` maps root_msg_id -> your
-    verdict ('keep'/'fix'/'drop')."""
-    pairs = [(r, manual[r["root_msg_id"]]) for r in picked if r["root_msg_id"] in manual]
-    if not pairs:
-        print("no overlap between picked units and manual labels")
-        return
-    agree = sum(1 for r, m in pairs if r["verdict"] == m)
-    # keep vs (fix|drop) — the decision that actually matters
-    binary = sum(
-        1 for r, m in pairs
-        if (r["verdict"] == "keep") == (m == "keep")
-    )
-    print(f"exact agreement:      {agree}/{len(pairs)} ({100 * agree // len(pairs)}%)")
-    print(f"keep/not-keep agree:  {binary}/{len(pairs)} ({100 * binary // len(pairs)}%)")
-    for r, m in pairs:
-        mark = "OK " if r["verdict"] == m else "!! "
-        print(f"  {mark} judge={r['verdict']:5} you={m:5}  {r['root_link']}")
-
-
 # --- plumbing ------------------------------------------------------------
 
 def _run_parallel(fn, items: list, *, label: str) -> list[dict]:

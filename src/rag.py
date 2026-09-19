@@ -79,7 +79,7 @@ def answer(query: str, k: int = config.TOP_K) -> dict:
     )
     client = openai_client()
     kwargs: dict = {
-        "model": config.GENERATION_MODEL,
+        "model": config.azure_deployment(config.GENERATION_MODEL),
         "seed": config.LLM_SEED,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},

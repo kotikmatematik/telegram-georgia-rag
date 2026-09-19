@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 
 import config
 from src.ingest import _chat_link
@@ -51,14 +50,16 @@ def _is_non_answer(answer: str) -> bool:
     return bool(_NON_ANSWER_RX.search(answer))
 
 
-# Backstop for rule #6: mask personal contacts (phone numbers, @handles) in
-# `answer` mechanically, same reasoning as _is_non_answer above — prompt
-# instructions alone aren't reliable enough on their own (see project
-# memory). A public chat/channel link is left alone (not a personal
-# contact) — only phone-number-shaped digit runs and @handles are masked.
-_CONTACT_PLACEHOLDER = "контакт есть в источнике"
+# Mask personal contacts (phone numbers, @handles) with a placeholder token —
+# not deleted (leaves grammatically broken remnants) and not a made-up claim
+# like "контакт есть в источнике" (breaks faithfulness: the judge flags it as
+# unconfirmed, since the thread never says that). A public chat/channel link
+# is left alone — not a personal contact. Called only from
+# src.fix_knowledge.save_fixed, AFTER judging/fixing — the judge must always
+# see the real, unmasked text.
 _PHONE_RX = re.compile(r"\+?\(?\d[\d\-\s\(\)]{5,}\d")
 _TG_HANDLE_RX = re.compile(r"@\w{4,}")
+_HANDLE_PLACEHOLDER = "@username"
 
 
 def _mask_contacts(answer: str) -> str:
@@ -66,10 +67,12 @@ def _mask_contacts(answer: str) -> str:
         digits = re.sub(r"\D", "", m.group(0))
         # >=9 digits: matches Georgian/Russian mobile numbers, not dates
         # (e.g. "2025-03-01" is only 8 digits) or short incidental numbers.
-        return _CONTACT_PLACEHOLDER if len(digits) >= 9 else m.group(0)
+        # X's match the real digit count, so it still reads as "a phone
+        # number was here" rather than a fixed, meaningless-length token.
+        return "X" * len(digits) if len(digits) >= 9 else m.group(0)
 
     answer = _PHONE_RX.sub(_phone_repl, answer)
-    answer = _TG_HANDLE_RX.sub(_CONTACT_PLACEHOLDER, answer)
+    answer = _TG_HANDLE_RX.sub(_HANDLE_PLACEHOLDER, answer)
     return answer
 
 # Russian on purpose: source chats and the target assistant are Russian-speaking.
@@ -96,11 +99,7 @@ SYSTEM_PROMPT = (
     "ответили только «100 лари» — вопрос должен быть «сколько стоит "
     "гравировка?», а НЕ «где сделать гравировку?» (на это не ответили).\n"
     "6. `answer` — связный практичный ответ; если мнения расходятся — отрази "
-    "это. Это мнения чата, не официальный источник. НЕ включай в `answer` "
-    "номера телефонов и личные контакты (@юзернейм, ссылку на личный профиль) "
-    "— вместо этого пиши «контакт есть в источнике по ссылке» (ссылка на тред "
-    "добавляется отдельно, отдельно её не пиши). Ссылку на ПУБЛИЧНЫЙ чат/канал "
-    "(не личный профиль) — это не контакт, оставляй как есть.\n"
+    "это. Это мнения чата, не официальный источник.\n"
     "7. `type` — как эту пару потом использовать при ответе:\n"
     "   - \"date_based\" — официально устанавливаемое (законы, налоги, визовые/"
     "таможенные требования, документы, тарифы) И любая конкретная ЦЕНА/СУММА "
@@ -134,22 +133,37 @@ SYSTEM_PROMPT = (
 )
 
 
+_GAP_MARKER_MINUTES = 30  # show a pause marker above this — 3x the burst gap,
+# so it only fires for genuinely notable silences, not normal back-and-forth.
+
+
+def _format_gap(minutes: float) -> str:
+    if minutes < 60:
+        return f"{int(minutes)} мин"
+    if minutes < 60 * 24:
+        return f"{minutes / 60:.1f} ч"
+    return f"{minutes / (60 * 24):.1f} дн"
+
+
 def _thread_text(thread: list[dict]) -> str:
+    """[id] sender: text, one line per message — tagged with "↩<id>" when the
+    message is a reply, and preceded by a "— пауза N —" marker after a
+    notable silence. Neither is visible otherwise (to the LLM or to a human
+    skimming a mixed-topic thread), which then has to guess purely from
+    wording which reply belongs to which message and where one topic ends
+    and another begins."""
     lines = []
+    prev_dt = None
     for m in thread:
+        dt = _parse_dt(m.get("date"))
+        if prev_dt and dt:
+            gap_min = (dt - prev_dt).total_seconds() / 60
+            if gap_min >= _GAP_MARKER_MINUTES:
+                lines.append(f"— пауза {_format_gap(gap_min)} —")
         sender = m.get("sender") or "Аноним"
-        lines.append(f"{sender}: {m['text']}")
-    return "\n".join(lines)
-
-
-def _thread_text_with_ids(thread: list[dict]) -> str:
-    """Like _thread_text, but each line is tagged [msg_id] so the branch split
-    (stage 1a) can reference original messages by id, and stage 1b can check
-    the split against the raw thread it's also given."""
-    lines = []
-    for m in thread:
-        sender = m.get("sender") or "Аноним"
-        lines.append(f"[{m['msg_id']}] {sender}: {m['text']}")
+        reply = f" ↩{m['reply_to']}" if m.get("reply_to") else ""
+        lines.append(f"[{m['msg_id']}]{reply} {sender}: {m['text']}")
+        prev_dt = dt or prev_dt
     return "\n".join(lines)
 
 
@@ -158,12 +172,13 @@ def _thread_text_with_ids(thread: list[dict]) -> str:
 # distill_thread, which always keeps the raw thread as the authoritative
 # source and passes the split only as a hint stage 1b may correct.
 SPLIT_SYSTEM = (
-    "Раздели тред Telegram-чата (каждое сообщение помечено [id]) на отдельные "
-    "смысловые ветки — независимые темы/вопросы, которые в нём обсуждаются "
-    "(тред мог собраться по времени и реплаям, а не по теме, поэтому внутри "
-    "могут быть несвязанные разговоры). Не меняй и не пересказывай текст "
-    "сообщений — верни только id сообщений, входящих в каждую ветку, в "
-    "исходном порядке.\n"
+    "Раздели тред Telegram-чата (каждое сообщение помечено [id], реплай — "
+    "«↩id», пауза перед сообщением — «— пауза N —») на отдельные смысловые "
+    "ветки — независимые темы/вопросы, которые в нём обсуждаются (тред мог "
+    "собраться по времени и реплаям, а не по теме, поэтому внутри могут быть "
+    "несвязанные разговоры — используй реплаи и паузы как подсказку о "
+    "границах тем). Не меняй и не пересказывай текст сообщений — верни "
+    "только id сообщений, входящих в каждую ветку, в исходном порядке.\n"
     "Ответь строго JSON: {\"branches\": [{\"topic\": \"кратко тема\", "
     "\"message_ids\": [id, id, ...]}]}"
 )
@@ -174,7 +189,7 @@ def _split_branches(thread: list[dict]) -> list[dict]:
     into semantic branches by id. Returns the raw branch list (possibly
     empty on failure — distill_thread then falls back to the raw thread alone)."""
     data = chat_json(
-        config.SPLIT_MODEL, SPLIT_SYSTEM, _thread_text_with_ids(thread),
+        config.SPLIT_MODEL, SPLIT_SYSTEM, _thread_text(thread),
         reasoning_effort=config.SPLIT_REASONING_EFFORT,
     )
     return data.get("branches") or []
@@ -193,15 +208,14 @@ def _branches_text(thread: list[dict], branches: list[dict]) -> str:
             m = by_id.get(mid)
             if m:
                 sender = m.get("sender") or "Аноним"
-                lines.append(f"[{mid}] {sender}: {m['text']}")
+                reply = f" ↩{m['reply_to']}" if m.get("reply_to") else ""
+                lines.append(f"[{mid}]{reply} {sender}: {m['text']}")
     return "\n".join(lines)
 
 
 def _items_to_units(items: list[dict], thread: list[dict], chat: dict) -> list[dict]:
-    """Shared post-processing: raw {"question","answer","type"} dicts from
-    either extraction path -> validated knowledge units. Identical for
-    distill_thread and distill_thread_one_stage so an A/B comparison isolates
-    the extraction call itself, not this filtering."""
+    """Raw {"question","answer","type",...} dicts from the extraction call ->
+    validated knowledge units."""
     root = thread[0]
     # latest activity in the thread — used later for recency weighting
     thread_date = thread[-1].get("date") or root.get("date") or ""
@@ -214,7 +228,8 @@ def _items_to_units(items: list[dict], thread: list[dict], chat: dict) -> list[d
             continue
         if _is_non_answer(a):
             continue  # model stated "no info" instead of omitting the pair (rule #3)
-        a = _mask_contacts(a)  # backstop for rule #6: strip phone numbers / @handles
+        # Contacts are masked later (src.fix_knowledge.save_fixed), not here —
+        # see _mask_contacts for why.
         ktype = (it.get("type") or "vote_based").strip().lower()
         if ktype not in {"date_based", "vote_based"}:
             ktype = "vote_based"
@@ -264,7 +279,7 @@ def distill_thread(thread: list[dict], chat: dict) -> list[dict]:
     is never used as truth on its own (a thread can mix unrelated topics; the
     split can be wrong).
     """
-    raw_text = _thread_text_with_ids(thread)
+    raw_text = _thread_text(thread)
     branches = _split_branches(thread)
     branches_text = _branches_text(thread, branches) if branches else ""
     user_content = (
@@ -279,21 +294,6 @@ def distill_thread(thread: list[dict], chat: dict) -> list[dict]:
 
     data = chat_json(
         config.EXTRACT_MODEL, SYSTEM_PROMPT, user_content,
-        temperature=0, reasoning_effort=config.EXTRACT_REASONING_EFFORT,
-    )
-    return _items_to_units(data.get("knowledge", []), thread, chat)
-
-
-def distill_thread_one_stage(thread: list[dict], chat: dict) -> list[dict]:
-    """A/B comparison variant: config.EXTRACT_MODEL extracts DIRECTLY from the
-    raw thread, no branch-split call first (the split stage skipped entirely,
-    not just ignored). Same SYSTEM_PROMPT, same post-processing
-    (_items_to_units) as distill_thread — the only difference under test is
-    whether the split call helps. Not used by distill_chat/the main pipeline;
-    call it directly to compare against distill_thread on the same threads.
-    """
-    data = chat_json(
-        config.EXTRACT_MODEL, SYSTEM_PROMPT, _thread_text_with_ids(thread),
         temperature=0, reasoning_effort=config.EXTRACT_REASONING_EFFORT,
     )
     return _items_to_units(data.get("knowledge", []), thread, chat)

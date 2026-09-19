@@ -13,11 +13,10 @@ load_dotenv()
 ROOT = Path(__file__).parent
 DATA_DIR = ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"              # raw messages: data/raw/<chat>.jsonl
-CHUNKS_DIR = DATA_DIR / "chunks"        # chunks: data/chunks/<chat>.jsonl
 KNOWLEDGE_DIR = DATA_DIR / "knowledge"  # distilled Q&A: data/knowledge/<chat>.jsonl
 CHROMA_DIR = ROOT / "chroma_db"         # persistent vector DB
 
-for _d in (RAW_DIR, CHUNKS_DIR, KNOWLEDGE_DIR):
+for _d in (RAW_DIR, KNOWLEDGE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # --- Secrets ---
@@ -163,18 +162,14 @@ REPROCESS_OVERLAP_DAYS = 3
 
 
 # --- Pipeline parameters ---
-FILTER_SPAM = True           # drop spam (money / drugs / ads / pets) before chunking; questions are kept
-CHUNK_MAX_GAP_MINUTES = 10   # if the gap between messages exceeds this, start a new chunk
+FILTER_SPAM = True           # drop spam (money / drugs / ads / pets) before distillation
+CHUNK_MAX_GAP_MINUTES = 10   # src/threads.py: gap that starts a new time-burst
 # Hard cap on a time-burst thread (src/threads.py) — prevents very busy chats
 # (near-continuous activity, no natural gaps) from chaining thousands of
 # unrelated messages into one giant "thread". Does not affect reply-based
 # links, which are never capped.
 THREAD_MAX_BURST_SIZE = 50
-CHUNK_MAX_CHARS = 1500       # max chunk size in characters
-CHUNK_MIN_CHARS = 40         # drop chunks shorter than this (low signal)
-REPLY_CHAIN_MAX_MSGS = 50    # follow full reply chains, but stop after this many ancestors (safety ceiling)
-REPLY_CONTEXT_MAX_CHARS = 2000  # cap total quoted reply context per chunk (each ancestor pulls its whole time-burst, bounded here)
-TOP_K = 8                    # how many chunks to feed into the LLM context
+TOP_K = 8                    # how many knowledge units to feed into the LLM context
 # Below this cosine score a hit is noise, not a real match — measured on
 # helpgeorgia: a genuine match scores 0.7+ and drops sharply after; a query
 # with NO real answer in the base still returns hits, but all clustered

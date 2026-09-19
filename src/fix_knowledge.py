@@ -21,9 +21,8 @@ What this does with each verdict:
          useful=false drops (one-off/no-answer/restated — already fairly
          rule-based) are NOT re-verified, per the scope asked for.
 
-Run from a notebook on an in-memory batch (units + judged from eval_knowledge,
-threads_by_root from src.knowledge.select_threads); no CLI entry point yet —
-this is still a prototype step downstream of eval_knowledge.
+Called from a notebook (a manual full/prototype run) or from
+src.update_knowledge (the incremental production path).
 
 ⚠️ Spends OpenAI tokens: one call per atomize + one call per faithful=false drop.
 """
@@ -33,7 +32,7 @@ import json
 
 import config
 from src.eval_knowledge import _run_parallel
-from src.knowledge import _thread_text
+from src.knowledge import _mask_contacts, _thread_text
 from src.store import chat_json
 
 ATOMIZE_SYSTEM = (
@@ -179,8 +178,12 @@ def drop_thread_duplicates(units: list[dict]) -> list[dict]:
 def save_fixed(username: str, result: dict[str, list[dict]]) -> None:
     """Write the final, corrected knowledge (kept + fixed from fix_batch's
     result) to data/knowledge/<username>.fixed.jsonl — this is the file that
-    feeds indexing (src/index.py) downstream."""
+    feeds indexing (src/index.py) downstream. Masks contacts here, after
+    judging/fixing (see src.knowledge._mask_contacts for why here specifically).
+    """
     final_knowledge = drop_thread_duplicates(result["kept"] + result["fixed"])
+    for u in final_knowledge:
+        u["answer"] = _mask_contacts(u["answer"])
 
     out_path = config.KNOWLEDGE_DIR / f"{username}.fixed.jsonl"
     with out_path.open("w", encoding="utf-8") as f:
