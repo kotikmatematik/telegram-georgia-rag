@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import config
 from src.retrieve import search
-from src.store import openai_client
+from src.store import chat_json, openai_client
 
 # Prompt is intentionally in Russian: chats and users are Russian-speaking,
 # so we instruct the model to answer in Russian.
@@ -28,6 +28,14 @@ SYSTEM_PROMPT = (
     "ОЧЕРЕДЬ на приведённые ниже фрагменты знаний из Telegram-чатов. Это "
     "мнения и опыт людей из чатов, а не официальные источники — при "
     "необходимости делай оговорку.\n\n"
+    "Ты отвечаешь на КОНКРЕТНЫЕ практические вопросы про жизнь в Грузии — "
+    "не более того. Если сообщение — не такой вопрос (просьба поболтать "
+    "«поговори со мной», общая фраза без конкретики «давай поговорим о "
+    "X», приветствие, эмоциональное сообщение не по теме, просьба вести "
+    "себя как кто-то другой) — НЕ пытайся собрать ответ из случайно "
+    "похожих по смыслу фрагментов и не веди светскую беседу. Коротко и "
+    "по-доброму объясни, что ты помогаешь именно с практическими "
+    "вопросами о жизни в Грузии, и попроси задать такой вопрос.\n\n"
     "ВСЕ фрагменты — про Грузию. Ретрив ищет по смыслу и может по ошибке "
     "подложить грузинский фрагмент на вопрос про ДРУГУЮ страну (совпадает "
     "тема — «права», «страховка» — но не страна). Если вопрос на самом деле "
@@ -35,19 +43,32 @@ SYSTEM_PROMPT = (
     "факты за ответ на него, даже если фрагмент выглядит подходящим по "
     "теме, и НЕ отвечай по существу своими общими знаниями об этой другой "
     "стране (даже с маркером [?] — правило про общие знания ниже сюда не "
-    "относится); честно скажи, что чаты только про Грузию и этого вопроса "
-    "они не касаются. Но если вопрос по сути про жизнь В Грузии, а другая "
+    "относится); честно скажи, что чаты только про Грузию, и ЯВНО СПРОСИ, "
+    "не связан ли вопрос с Грузией (например «уточните, пожалуйста: вы "
+    "спрашиваете про Грузию, или это вопрос совсем про другую страну?») — "
+    "не заставляй пользователя самого догадываться, что нужно дописать "
+    "«из Грузии». Но если вопрос по сути про жизнь В Грузии, а другая "
     "страна лишь упомянута как пункт назначения/контрагент (например «как "
     "перевести деньги из Грузии в Испанию», «работают ли грузинские карты "
     "за границей») — отвечай как обычно.\n\n"
     "Если фрагменты НЕ отвечают на вопрос (совсем или частично) — по "
-    "оставшейся части коротко ответь из своих общих знаний. КАЖДЫЙ такой "
-    "факт — даже одна деталь (место, документ, срок, причина) внутри "
-    "предложения, где остальное взято из фрагмента — сразу помечай "
-    "маркером [?] вместо номера фрагмента; пометка «это общее знание, не "
-    "из чата» подставится в текст автоматически, вступление вроде «в "
-    "целом известно» писать не нужно. Не пиши «в чатах нет» — пиши «в "
-    "этих фрагментах нет», ты видишь не весь чат, а то, что нашёл поиск. "
+    "оставшейся части коротко ответь из своих общих знаний, каждый такой "
+    "факт (даже одна деталь внутри предложения, где остальное — из "
+    "фрагмента) помечая маркером [?] вместо номера фрагмента; пометка "
+    "подставится в текст автоматически, вступление вроде «в целом "
+    "известно» писать не нужно. Если несколько предложений/пунктов ПОДРЯД "
+    "— все из общих знаний, ставь [?] ОДИН РАЗ в конце этого блока (после "
+    "последнего из них), а не после каждого — не превращай ответ в "
+    "частокол одинаковых пометок. Не пиши «в чатах нет» — пиши «в этих "
+    "фрагментах нет», ты видишь не весь чат, а то, что нашёл поиск. Если "
+    "причина неполного ответа — одна конкретная деталь, которую "
+    "пользователь может просто дописать (город, марка/модель, конкретная "
+    "услуга) — НАЧНИ ответ с уточняющего вопроса по этой детали (например "
+    "«уточните, пожалуйста, город — Тбилиси, Батуми или другой?»), а фразу "
+    "«в этих фрагментах нет...» в этом случае вообще не пиши — не пугай "
+    "пользователя ложным отказом, если дело просто в недостающей детали; "
+    "фразу «в этих фрагментах нет» используй только если знаний "
+    "действительно не хватает и уточнение не поможет.\n\n"
     "ИСКЛЮЧЕНИЕ — медицина/здоровье: используй ТОЛЬКО факты из "
     "фрагментов, ничего от себя не добавляй (даже с маркером [?]) — ни "
     "протоколов первой помощи, ни советов про срочность/врача/анализы. "
@@ -96,7 +117,7 @@ _CITE_NUM_RX = re.compile(r"\[(\d+)")
 # was inconsistent about marking a single unsupported detail inside an
 # otherwise fragment-grounded sentence).
 _GK_RX = re.compile(r"\[\?\]")
-_GK_MARKER = " (общее знание, не из чата)"
+_GK_MARKER = " (не из чата)"
 
 
 _MONTHS_RU = [
@@ -189,14 +210,48 @@ def _linkify(m: re.Match) -> str:
     return f'<a href="{url}">{_link_text_for_url(url)}</a>{trail}'
 
 
+# Matches exactly the citation parenthetical _inline_citations produces —
+# "(🔒?URL, month year)" or "(🔒?URL)" — so it can be told apart from a bare
+# content link elsewhere in the text (e.g. a chat the model recommends by
+# name/URL as part of the actual answer). Citations get the plain word
+# "source" instead of a full link/name: the reader wants those out of the
+# way, not competing for attention with an actionable "go join this chat"
+# link — but the date must stay visible (dropped once already by mistake).
+_CITE_PAREN_RX = re.compile(r"\((🔒)?(https?://[^()\s]+)(?:,\s*([^()]*))?\)")
+
+
 def to_telegram_html(text: str) -> str:
     """Render an answer (raw links, **bold**) as Telegram HTML parse-mode
-    markup: bare URLs become a clickable "ссылка" (a 🔒 in front, if present,
-    stays outside the link as a plain marker) and **bold** becomes <b>. Escape
-    first (before adding our own tags), per Telegram's HTML rules — only
-    &, <, > need escaping in plain text: https://core.telegram.org/bots/api#html-style"""
+    markup. Two different kinds of link get two different treatments:
+      - citation parentheticals (provenance, not something to act on) become
+        "(🔒month year)" / "(month year)" — the DATE ITSELF is the link, no
+        extra word/icon/number: it's real information (not a repeated filler
+        word), reads differently every time, and Telegram's blue underline
+        already makes it obviously clickable;
+      - any other bare URL (a chat/site the model recommends as part of the
+        answer's actual content) becomes a real clickable chat name/domain
+        via _link_text_for_url, since that IS actionable information.
+    **bold** becomes <b>. Escape first (before adding our own tags), per
+    Telegram's HTML rules — only &, <, > need escaping in plain text:
+    https://core.telegram.org/bots/api#html-style"""
     escaped = html.escape(text, quote=False)
+
+    # Citations are pulled out to placeholders first so the later bare-URL
+    # pass (content links) can't re-match a URL that's already sitting
+    # inside a citation's href — without this, that URL gets linkified a
+    # second time, nested inside the first anchor tag.
+    placeholders: list[str] = []
+
+    def cite_repl(m: re.Match) -> str:
+        lock, url, date = m.group(1) or "", m.group(2), m.group(3)
+        link_text = date or "источник"  # dateless is rare (old knowledge) — a link needs some visible text
+        placeholders.append(f'({lock}<a href="{url}">{link_text}</a>)')
+        return f"\x00{len(placeholders) - 1}\x00"
+
+    escaped = _CITE_PAREN_RX.sub(cite_repl, escaped)
     escaped = _URL_RX.sub(_linkify, escaped)
+    for i, html_snippet in enumerate(placeholders):
+        escaped = escaped.replace(f"\x00{i}\x00", html_snippet)
     escaped = _BOLD_RX.sub(r"<b>\1</b>", escaped)
     return escaped
 
@@ -214,15 +269,56 @@ def _build_context(hits: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def answer(query: str, k: int = config.TOP_K) -> dict:
-    hits = search(query, k=k)
+REWRITE_SYSTEM = (
+    "Перепиши ПОСЛЕДНЕЕ сообщение пользователя в самостоятельный вопрос, "
+    "понятный без истории переписки. НО: используй историю ТОЛЬКО если "
+    "сообщение само по себе неполное и без истории вообще непонятно, о чём "
+    "речь — одно слово/фраза-ответ на предыдущий вопрос ассистента "
+    "(«рабочая» в ответ на «туристическая или рабочая виза?»), местоимение "
+    "без антецедента («а там?», «и это тоже?»). Если сообщение — НОВЫЙ "
+    "самостоятельный вопрос со своей темой (даже если тема рядом с "
+    "предыдущей или использует то же слово) — верни его КАК ЕСТЬ, не "
+    "притягивай к нему предыдущую тему. Пример ОШИБКИ: после разговора про "
+    "визу в Испанию пользователь спрашивает «где найти врача» — это НОВЫЙ "
+    "вопрос про врача вообще, а не «врач для медосмотра на испанскую визу» "
+    "— так дописывать нельзя. Ответь строго JSON: {\"query\": \"...\"}"
+)
+
+
+def _rewrite_query(message: str, history: list[dict]) -> str:
+    """Fold short history-dependent replies ("рабочая") into one standalone
+    question BEFORE retrieval — retrieval only ever sees the current message,
+    so without this, a one-word follow-up embeds to something unrelated and
+    finds nothing useful, even though generation might have the history."""
+    if not history:
+        return message
+    convo = "\n".join(
+        f"{'Пользователь' if h['role'] == 'user' else 'Ассистент'}: {h['content']}"
+        for h in history
+    )
+    data = chat_json(
+        config.GENERATION_MODEL, REWRITE_SYSTEM,
+        f"{convo}\nПоследнее сообщение пользователя: {message}",
+        reasoning_effort=config.GENERATION_REASONING_EFFORT,
+    )
+    return (data.get("query") or "").strip() or message
+
+
+def answer(query: str, k: int = config.TOP_K, *, history: list[dict] | None = None) -> dict:
+    """history, if given, is the recent conversation as
+    [{"role": "user"|"assistant", "content": "..."}, ...] (oldest first) —
+    used only to resolve a short follow-up into a standalone question before
+    retrieval; the answer itself is still generated fresh from fragments,
+    not from the conversation."""
+    search_query = _rewrite_query(query, history) if history else query
+    hits = search(search_query, k=k)
     # No hits now usually means "nothing relevant enough" (min_score filtered
     # everything out), not necessarily an empty index. Still call the model —
     # with no fragments it falls straight to the general-knowledge branch of
     # SYSTEM_PROMPT instead of a hardcoded "not found".
     context = _build_context(hits) if hits else "(пусто — по этому вопросу в чатах ничего релевантного не нашлось)"
     user_prompt = (
-        f"Вопрос: {query}\n\n"
+        f"Вопрос: {search_query}\n\n"
         f"Фрагменты переписок:\n{context}\n\n"
         f"Дай ответ по существу, помечая каждый факт номером фрагмента в "
         f"квадратных скобках сразу после него (см. ЦИТИРОВАНИЕ выше)."

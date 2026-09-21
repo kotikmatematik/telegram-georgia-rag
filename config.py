@@ -67,6 +67,13 @@ def azure_deployment(model: str) -> str:
 EMBED_MODEL = "text-embedding-3-small"
 CHAT_MODEL = "gpt-4o-mini"  # kept as the "old model" reference value for reverts below
 
+# Voice message transcription (src/bot.py voice handler, via
+# src.store.transcribe_audio) — ALWAYS via direct OpenAI (api.openai.com),
+# never Azure: the Azure resource in use has no Whisper/transcribe
+# deployment (verified — every whisper/gpt-*-transcribe name 404s there).
+# Not affected by USE_AZURE_OPENAI/azure_deployment().
+TRANSCRIBE_MODEL = "whisper-1"
+
 # Final answer generation (src/rag.py) — the live, user-facing step. Reasoning
 # effort kept low: this runs synchronously per user question (unlike the
 # offline pipeline stages), so latency matters more here.
@@ -189,6 +196,11 @@ TOP_K = 6
 RETRIEVAL_MIN_SCORE = 0.55
 EMBED_BATCH = 100            # batch size for embedding requests
 
+# --- Bot abuse guard (src/bot.py) ---
+# ~$0.0007/query measured live (config.GENERATION_MODEL, TOP_K=6 context).
+BOT_MAX_REQUESTS_PER_DAY = 10
+BOT_UNLIMITED_USER_IDS = {273465125}  # Aleksandra (@elder_flower) — exempt from the daily cap
+
 # --- Retrieval + RAG evaluation (src/eval_retrieval.py, src/eval_rag.py) ---
 # Wider than TOP_K on purpose: eval_retrieval fetches this many candidates
 # ONCE per query (min_score=0.0) and then sweeps RETRIEVAL_EVAL_THRESHOLDS
@@ -219,4 +231,5 @@ CHATS = [
     {"username": "georgia_it", "chat_id": -1001688709586, "title": "Грузия IT чат"},
     {"username": "gruzia_medicina", "chat_id": -1001781403833, "title": "Грузия медицина"},
     {"username": "georgia_woman", "chat_id": -1001276829180, "title": "Тбилиси женский чат"},
+    {"username": "Gruziya_Mastera", "chat_id": -1001896208901, "title": "Грузия мастера услуги Батуми Тбилиси"},
 ]

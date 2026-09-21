@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
 from src.ingest import _chat_link
@@ -22,6 +23,14 @@ from src.preprocess import _load_raw, _parse_dt
 from src.spam import filter_spam
 from src.store import chat_json
 from src.threads import build_threads
+
+# Same concurrency level as eval_knowledge.JUDGE_WORKERS — safe because
+# src.store's openai_client()/get_collection() are lock-protected
+# (threading.Lock, added after the eval pipeline's first concurrent access
+# corrupted the Chroma tenant). Distillation is 2 sequential LLM calls per
+# thread (split + extract) and was previously the only fully-sequential step
+# of the pipeline — the dominant cost of a full run.
+DISTILL_WORKERS = 8
 
 
 def _thread_latest_dt(thread: list[dict]):
@@ -351,6 +360,20 @@ def select_threads(
     return threads
 
 
+def _distill_thread_safe(thread: list[dict], chat: dict) -> tuple[list[dict], str | None]:
+    """distill_thread wrapped so a single bad thread (e.g. Azure's content
+    filter tripping on one message) can be skipped without killing the whole
+    ThreadPoolExecutor — returns (units, error_note); error_note is None on
+    success. Exceptions must not escape into as_completed()/fut.result(),
+    or one bad thread would still kill the whole run, just via a different
+    mechanism than the old sequential loop's try/except."""
+    try:
+        return distill_thread(thread, chat), None
+    except Exception as e:
+        root_id = thread[0]["msg_id"]
+        return [], f"SKIPPED thread root={root_id} ({type(e).__name__}: {e})"
+
+
 def distill_threads(
     threads: list[list[dict]], chat: dict, *, checkpoint_cb=None, checkpoint_every: int = 100
 ) -> list[dict]:
@@ -358,24 +381,32 @@ def distill_threads(
     the incremental update path in src/update_knowledge.py, which only wants
     to (re)distill a subset, not the whole chat).
 
+    Runs DISTILL_WORKERS threads concurrently — order of completion is not
+    the input order, but that's fine: each knowledge unit already carries its
+    own root_msg_id/source_msg_id, nothing downstream (checkpointing, resume,
+    indexing) depends on output order. All accumulation and every
+    checkpoint_cb call happen in this one (main) thread, driven by
+    as_completed() — never inside a worker — so no locking is needed here.
+
     checkpoint_cb, if given, is called with the knowledge collected SO FAR
-    every `checkpoint_every` threads (and once more at the very end) — see
-    distill_chat, which uses this to persist partial progress on a long run
-    instead of only writing once at the very end."""
+    every `checkpoint_every` COMPLETED threads (and once more at the very
+    end) — see distill_chat, which uses this to persist partial progress on
+    a long run instead of only writing once at the very end."""
     knowledge: list[dict] = []
-    for i, thread in enumerate(threads, 1):
-        try:
-            knowledge.extend(distill_thread(thread, chat))
-        except Exception as e:
-            # A single bad thread (e.g. Azure's content filter tripping on one
-            # message) must not kill a multi-hour run over the rest of the
-            # chat — log which thread and move on, don't retry silently.
-            root_id = thread[0]["msg_id"]
-            print(f"[knowledge] {chat['username']}: SKIPPED thread root={root_id} ({type(e).__name__}: {e})")
-        if i % 25 == 0 or i == len(threads):
-            print(f"[knowledge] {chat['username']}: {i}/{len(threads)} threads -> {len(knowledge)} items")
-        if checkpoint_cb and (i % checkpoint_every == 0 or i == len(threads)):
-            checkpoint_cb(knowledge)
+    total = len(threads)
+    done = 0
+    with ThreadPoolExecutor(max_workers=DISTILL_WORKERS) as ex:
+        futures = {ex.submit(_distill_thread_safe, t, chat): t for t in threads}
+        for fut in as_completed(futures):
+            units, error_note = fut.result()
+            if error_note:
+                print(f"[knowledge] {chat['username']}: {error_note}")
+            knowledge.extend(units)
+            done += 1
+            if done % 25 == 0 or done == total:
+                print(f"[knowledge] {chat['username']}: {done}/{total} threads -> {len(knowledge)} items")
+            if checkpoint_cb and (done % checkpoint_every == 0 or done == total):
+                checkpoint_cb(knowledge)
     return knowledge
 
 

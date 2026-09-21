@@ -1,6 +1,7 @@
 """Shared helpers: OpenAI client, embeddings, access to the Chroma collection."""
 from __future__ import annotations
 
+import io
 import json
 import threading
 
@@ -100,6 +101,43 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         resp = client.embeddings.create(model=config.azure_deployment(config.EMBED_MODEL), input=batch)
         out.extend(d.embedding for d in resp.data)
     return out
+
+
+_openai_direct: OpenAI | None = None
+
+
+def _openai_direct_client() -> OpenAI:
+    """A plain OpenAI() client on config.OPENAI_API_KEY, bypassing
+    USE_AZURE_OPENAI entirely. Separate from openai_client() because the
+    Azure resource currently in use (friend's credits) has no Whisper/
+    transcription deployment — verified directly: every whisper/
+    gpt-*-transcribe model name 404s there with DeploymentNotFound, while
+    OPENAI_API_KEY against api.openai.com works. So voice transcription
+    always goes to OpenAI direct, regardless of which endpoint text
+    generation/embeddings use."""
+    global _openai_direct
+    if _openai_direct is None:
+        with _client_lock:
+            if _openai_direct is None:
+                if not config.OPENAI_API_KEY:
+                    raise SystemExit(
+                        "OPENAI_API_KEY is not set in .env (needed for voice "
+                        "transcription — the Azure resource has no Whisper deployment)"
+                    )
+                _openai_direct = OpenAI(api_key=config.OPENAI_API_KEY)
+    return _openai_direct
+
+
+def transcribe_audio(file_bytes: bytes, filename: str = "voice.ogg") -> str:
+    """Speech-to-text via OpenAI's Whisper API (see _openai_direct_client
+    above). filename's extension is a format hint the SDK reads off
+    file.name for the multipart upload — Telegram voice messages are .ogg
+    (Opus), which Whisper accepts directly, no conversion needed."""
+    client = _openai_direct_client()
+    buf = io.BytesIO(file_bytes)
+    buf.name = filename
+    resp = client.audio.transcriptions.create(model=config.TRANSCRIBE_MODEL, file=buf)
+    return (resp.text or "").strip()
 
 
 def get_collection():

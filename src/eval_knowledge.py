@@ -259,7 +259,18 @@ def judge_units(
     for pairs in _run_parallel(judge_group, list(groups.keys()), label=label):
         for idx, row in pairs:
             out[idx] = row
-    return out
+    # A whole thread's judge_group call can itself raise (now caught inside
+    # _run_parallel and simply absent from its output, instead of killing the
+    # run — see that function's docstring for the real incident this fixes) —
+    # every unit in that thread would otherwise stay None here, and
+    # fix_batch's `j.get("verdict")` crashes on a None judged row. Give them
+    # an explicit skip verdict instead, same shape as the "thread not found"
+    # branch above.
+    return [
+        o if o is not None
+        else {**_unit_ref(units[i]), "verdict": "skip", "note": "судья упал на этом треде (см. лог)"}
+        for i, o in enumerate(out)
+    ]
 
 
 def eval_precision(
@@ -363,14 +374,28 @@ def _report_recall(rows: list[dict], *, total_empty: int) -> None:
 
 def _run_parallel(fn, items: list, *, label: str) -> list[dict]:
     """Map fn over items with a small thread pool, keeping input order and
-    printing progress every 25 completions."""
+    printing progress every 25 completions.
+
+    A single item raising (e.g. Azure's content filter tripping on one judge
+    call) is logged and skipped, not left to kill the whole run — this is
+    exactly what happened for real (eval_precision on tbilisi_girl died on a
+    content_filter BadRequestError, taking the rest of the multi-chat
+    pipeline down with it) before this try/except was added. Mirrors the
+    per-thread isolation src.knowledge.distill_threads already had; this
+    file's callers (eval_precision, fix_knowledge's atomize/reverify) simply
+    get fewer rows back for a skipped item, same as they would for any other
+    item legitimately producing nothing."""
     total = len(items)
     done = 0
     results: list[dict | None] = [None] * total
     with ThreadPoolExecutor(max_workers=JUDGE_WORKERS) as ex:
         futures = {ex.submit(fn, it): i for i, it in enumerate(items)}
         for fut in as_completed(futures):
-            results[futures[fut]] = fut.result()
+            i = futures[fut]
+            try:
+                results[i] = fut.result()
+            except Exception as e:
+                print(f"[{label}] SKIPPED item {i} ({type(e).__name__}: {e})")
             done += 1
             if done % 25 == 0 or done == total:
                 print(f"[{label}] {done}/{total}")
