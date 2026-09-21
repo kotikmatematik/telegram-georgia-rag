@@ -81,7 +81,12 @@ SYSTEM_PROMPT = (
     "Telegram-чатов для справочного ассистента. На вход — один тред (обсуждение). "
     "Сформируй список пар «вопрос-ответ» в формате JSON.\n\n"
     "Правила:\n"
-    "1. Опирайся ТОЛЬКО на то, что реально сказано в треде. Ничего не выдумывай.\n"
+    "1. Опирайся ТОЛЬКО на то, что реально сказано в треде. Ничего не выдумывай — "
+    "включая советы, предупреждения и оговорки «на всякий случай» (например "
+    "«обратитесь к врачу», «не доверяйте советам из интернета»), которых в "
+    "треде не было. Это касается и медицинских тем: если участники обсуждали "
+    "лечение/симптомы, пиши только то, что реально написали, без добавления "
+    "дисклеймеров от себя.\n"
     "2. АТОМАРНОСТЬ. Каждая пара = РОВНО ОДНА тема. Тред с несколькими темами — "
     "раздели на несколько пар.\n"
     "3. ЕСТЬ ОТВЕТ. Создавай пару, только если на вопрос реально ответили. Если "
@@ -346,15 +351,31 @@ def select_threads(
     return threads
 
 
-def distill_threads(threads: list[list[dict]], chat: dict) -> list[dict]:
+def distill_threads(
+    threads: list[list[dict]], chat: dict, *, checkpoint_cb=None, checkpoint_every: int = 100
+) -> list[dict]:
     """Distill an already-selected list of threads (shared by distill_chat and
     the incremental update path in src/update_knowledge.py, which only wants
-    to (re)distill a subset, not the whole chat)."""
+    to (re)distill a subset, not the whole chat).
+
+    checkpoint_cb, if given, is called with the knowledge collected SO FAR
+    every `checkpoint_every` threads (and once more at the very end) — see
+    distill_chat, which uses this to persist partial progress on a long run
+    instead of only writing once at the very end."""
     knowledge: list[dict] = []
     for i, thread in enumerate(threads, 1):
-        knowledge.extend(distill_thread(thread, chat))
+        try:
+            knowledge.extend(distill_thread(thread, chat))
+        except Exception as e:
+            # A single bad thread (e.g. Azure's content filter tripping on one
+            # message) must not kill a multi-hour run over the rest of the
+            # chat — log which thread and move on, don't retry silently.
+            root_id = thread[0]["msg_id"]
+            print(f"[knowledge] {chat['username']}: SKIPPED thread root={root_id} ({type(e).__name__}: {e})")
         if i % 25 == 0 or i == len(threads):
             print(f"[knowledge] {chat['username']}: {i}/{len(threads)} threads -> {len(knowledge)} items")
+        if checkpoint_cb and (i % checkpoint_every == 0 or i == len(threads)):
+            checkpoint_cb(knowledge)
     return knowledge
 
 
@@ -364,6 +385,8 @@ def distill_chat(
     limit: int | None = None,
     min_thread_size: int = 2,
     write: bool = True,
+    resume: bool = False,
+    checkpoint_every: int = 100,
 ) -> list[dict]:
     """Distill ALL selected threads of one chat into knowledge units (full,
     from-scratch run — overwrites data/knowledge/<username>.jsonl entirely).
@@ -376,18 +399,42 @@ def distill_chat(
         min_thread_size: skip threads with fewer messages (default 2 = only
             discussions; set 1 to also distill standalone informative messages).
         write: also write data/knowledge/<username>.jsonl.
+        resume: if data/knowledge/<username>.jsonl already exists, skip any
+            thread whose root_msg_id already appears in it (from a previous,
+            interrupted run) instead of redoing it. A thread that previously
+            ran but produced ZERO items has no trace in that file, so it gets
+            redone on resume — wasted tokens, not a correctness problem.
+        checkpoint_every: with write=True, re-save the file every this many
+            threads (not just once at the very end) so a crash mid-run loses
+            at most this many threads of work — see distill_threads.
     """
     chat = next((c for c in config.CHATS if c["username"] == username), None)
     threads = select_threads(username, limit=limit, min_thread_size=min_thread_size)
-    knowledge = distill_threads(threads, chat)
+    out_path = config.KNOWLEDGE_DIR / f"{username}.jsonl"
+
+    prior: list[dict] = []
+    if resume and out_path.exists():
+        with out_path.open(encoding="utf-8") as f:
+            prior = [json.loads(line) for line in f if line.strip()]
+        done_roots = {k["root_msg_id"] for k in prior}
+        threads = [t for t in threads if t[0]["msg_id"] not in done_roots]
+        print(f"[knowledge] {username}: resuming — {len(done_roots)} threads already "
+              f"checkpointed, {len(threads)} remaining")
+
+    def save(partial: list[dict]) -> None:
+        with out_path.open("w", encoding="utf-8") as f:
+            for k in prior + partial:
+                f.write(json.dumps(k, ensure_ascii=False) + "\n")
+
+    knowledge = distill_threads(
+        threads, chat, checkpoint_cb=save if write else None, checkpoint_every=checkpoint_every,
+    )
+    all_knowledge = prior + knowledge
 
     if write:
-        out_path = config.KNOWLEDGE_DIR / f"{username}.jsonl"
-        with out_path.open("w", encoding="utf-8") as f:
-            for k in knowledge:
-                f.write(json.dumps(k, ensure_ascii=False) + "\n")
-        print(f"[knowledge] saved {len(knowledge)} items -> {out_path}")
-    return knowledge
+        save(knowledge)
+        print(f"[knowledge] saved {len(all_knowledge)} items -> {out_path}")
+    return all_knowledge
 
 
 def main() -> None:

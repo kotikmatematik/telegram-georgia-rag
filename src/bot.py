@@ -13,7 +13,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message
 
 import config
-from src.rag import answer
+from src.rag import answer, to_telegram_html
 
 logging.basicConfig(level=logging.INFO)
 dp = Dispatcher()
@@ -43,7 +43,7 @@ async def on_question(message: Message) -> None:
     # answer() is synchronous (blocking OpenAI calls), so run it in a thread
     result = await asyncio.to_thread(answer, query)
     text = result["answer"] or "Не удалось сформировать ответ."
-    await message.answer(text, disable_web_page_preview=True)
+    await message.answer(to_telegram_html(text), parse_mode="HTML", disable_web_page_preview=True)
 
 
 async def main() -> None:

@@ -192,8 +192,8 @@ CHATS = [
     {"username": "helpgeorgia", "chat_id": -1001452236047, "title": "Взаимопомощь. Грузия"},
     {"username": "ipgeorgiachat", "chat_id": -1001670908431, "title": "ИП/Бизнес Грузия"},
     {"username": "nogotochki", "chat_id": -1001318697228, "title": "Ноготочки", "private": True},
+    {"username": "paravaingeorgia", "chat_id": -1001512786455, "title": "Получение водительских прав в Грузии"},
     # Uncomment to add more chats when scaling up:
-    # {"username": "paravaingeorgia", "chat_id": -1001512786455, "title": "Получение водительских прав в Грузии"},
     # {"username": "mygeorgia_chat", "chat_id": -1001486751358, "title": "ГРУЗИЯ ЧАТ"},
     # {"username": "tbilisi_girl", "chat_id": -1001549075106, "title": "Женский чат Тбилиси"},
     # {"username": "georgia_it", "chat_id": -1001688709586, "title": "Грузия IT чат"},
