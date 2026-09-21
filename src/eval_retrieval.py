@@ -198,26 +198,6 @@ def _pick_best(candidate_rows: list[dict]) -> dict | None:
     return max(ok, key=lambda r: (r["f1"] or 0, -r["avg_hits"]))
 
 
-def _report_sweep(sweep_rows: list[dict]) -> None:
-    print(f"\n{'thr':>5} | {'precision':>9} | {'recall':>7} | {'f1':>5} | {'hit_rate':>8} | "
-          f"{'avg_hits':>8} | {'no_answer_leak':>14} | {'critical_hit_rate':>17}")
-    for r in sweep_rows:
-        print(f"{r['threshold']:>5} | {_fmt(r['precision']):>9} | {_fmt(r['recall']):>7} | "
-              f"{_fmt(r['f1']):>5} | {_fmt(r['hit_rate']):>8} | {_fmt(r['avg_hits']):>8} | "
-              f"{_fmt(r['no_answer_leak']):>14} | {_fmt(r['critical_hit_rate']):>17}")
-
-    # Advisory only — final call is the human's, made after reading the table
-    # and the dumped per-query rows, not from this one line.
-    best = _pick_best(sweep_rows)
-    if best:
-        print(f"\nСовет (не окончательный — смотри таблицу и провалы сама): "
-              f"порог {best['threshold']} — no_answer_leak=0, "
-              f"critical_hit_rate={best['critical_hit_rate']}, f1={_fmt(best['f1'])}")
-    else:
-        print("\nНи один порог не даёт одновременно no_answer_leak=0 и "
-              "critical_hit_rate=1.0 — смотри таблицу и провалившиеся строки внимательно.")
-
-
 def _report_grid(grid_rows: list[dict]) -> None:
     print(f"\n{'k':>3} | {'thr':>5} | {'precision':>9} | {'recall':>7} | {'f1':>5} | "
           f"{'hit_rate':>8} | {'avg_hits':>8} | {'no_answer_leak':>14} | {'critical_hit_rate':>17}")

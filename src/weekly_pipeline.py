@@ -30,7 +30,7 @@ from src.update_knowledge import update_knowledge
 
 def main() -> None:
     t0 = time.time()
-    print(f"[weekly] === run started ===", flush=True)
+    print("[weekly] === run started ===", flush=True)
 
     print("[weekly] ingest...", flush=True)
     subprocess.run([sys.executable, "-m", "src.ingest"], check=True)
