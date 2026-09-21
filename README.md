@@ -1,27 +1,69 @@
 # telegram-georgia-rag
 
-A RAG assistant (Telegram bot) that answers questions about life in Georgia
-based on conversations from Russian-speaking topical Telegram chats (sole
-proprietorship/business, driver's licenses, rent, services, classifieds, etc.).
+A RAG assistant (Telegram bot) that answers practical questions about life in
+Georgia, distilled from real discussions in Russian-speaking topical
+Telegram chats (business/sole proprietorship, driver's licenses, rent,
+medicine, services, IT, etc.). Every answer cites the source chat and date;
+if the chats don't cover a question, the bot says so honestly instead of
+guessing.
 
-> The bot answers in Russian, because the source chats and target users are
+> The bot answers in Russian — the source chats and target users are
 > Russian-speaking.
+
+**Bot:** _(ссылка появится здесь, когда определимся с именем — @TODO)_
 
 ## How it works
 
+Two separate pipelines share the same knowledge store:
+
 ```
-Telegram → ingest → preprocess/chunk → embed+index (Chroma) → retrieve → GPT → bot
+                     ┌─ collection (offline, run by hand / weekly cron) ─┐
+Telegram chats → ingest → threads → knowledge (LLM) → eval → fix → index
+                                                                       │
+                                                                       ▼
+                                                                 chroma_db
+                                                                       │
+                     ┌─ serving (always on, on the server) ────────────┘
+User message → rag (retrieve + generate + cite) → bot (Telegram) → answer
 ```
 
-- **ingest** — fetch chat history into `data/raw/*.jsonl` (Telethon). Cutoff by
-  date (`INGEST_SINCE` in `config.py`), not by count; re-runs append only new
-  messages
-- **preprocess** — drop spam (money / drugs / ads / pet-rehoming; questions are
-  kept), then group messages into dialog chunks `data/chunks/*.jsonl`
-  (time windows + reply chains)
-- **index** — OpenAI embeddings → local ChromaDB vector store
-- **rag** — retrieve top-k chunks + generate an answer with source links
-- **bot** — Telegram interface (aiogram)
+- **`src/ingest.py`** — fetch chat history into `data/raw/<chat>.jsonl`
+  (Telethon). Incremental: reruns only fetch messages newer than what's
+  already on disk.
+- **`src/threads.py`** — group raw messages into threads by reply-chains and
+  time-proximity bursts (capped at `config.THREAD_MAX_BURST_SIZE`).
+  `src/spam.py` drops ads/one-off classifieds/pet-rehoming before this.
+- **`src/knowledge.py`** — the actual "distillation": an LLM reads each
+  thread and extracts durable `{question, answer, type, city}` knowledge
+  units (chit-chat/one-off threads yield nothing). Checkpointed and
+  resumable (`resume=True`), with per-thread error isolation — one thread
+  tripping Azure's content filter doesn't kill a multi-hour run.
+- **`src/eval_knowledge.py`** / **`src/fix_knowledge.py`** — an independent
+  LLM judge checks each unit against its source thread (faithful? atomic?
+  right type/city?), then fixes what's fixable and drops what isn't
+  (with a second independent opinion before any faithfulness-based drop).
+- **`src/index.py`** — embeds `data/knowledge/<chat>.fixed.jsonl` into a
+  local Chroma collection. Diffs by content hash — only embeds what's new or
+  changed, never a full re-embed.
+- **`src/update_knowledge.py`** / **`src/weekly_pipeline.py`** — the
+  recurring incremental version of the above: only re-touches threads active
+  since the last run, for every configured chat, then re-indexes. See
+  [Keeping the knowledge fresh](#keeping-the-knowledge-fresh) below.
+- **`src/retrieve.py`** — embed a query, search Chroma (`config.TOP_K`,
+  `config.RETRIEVAL_MIN_SCORE`).
+- **`src/rag.py`** — build the answer: retrieve, generate with inline
+  citations, resolve short follow-ups against conversation history
+  (`_rewrite_query`), render Telegram HTML with real source links.
+- **`src/bot.py`** — the Telegram interface (aiogram): text questions, voice
+  messages (transcribed via Whisper), inline mode (`@bot вопрос` in any
+  chat, no need to add the bot there), per-user daily rate limit, and a
+  JSONL interaction log for analytics/future eval-set growth.
+- **`src/eval_retrieval.py`** / **`src/eval_rag.py`** — a from-scratch
+  evaluation harness (not ragas) against `eval/golden_queries.jsonl`: sweeps
+  `(k, threshold)` for retrieval, judges faithfulness/relevance/hallucination
+  for full answers, and never lets a `critical`-category failure hide inside
+  an average pass rate. See that file's docstrings and
+  `notebooks/explore.ipynb` (sections 15-16) for the metrics explained.
 
 ## Setup
 
@@ -30,40 +72,94 @@ uv sync
 cp .env.example .env   # then fill in the keys
 ```
 
-Fill in `.env`:
-- `OPENAI_API_KEY` — OpenAI key
-- `BOT_TOKEN` — bot token from [@BotFather](https://t.me/BotFather)
-- `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` — from https://my.telegram.org/apps
-- `TELEGRAM_PHONE` — phone number of the account that is a member of the chats
-
-The chat list is configured in `config.py` (`CHATS`).
+See `.env.example` for what each key is for. The chat list lives in
+`config.py` (`CHATS`) — the bot's account (`TELEGRAM_PHONE`) must already be
+a member of every chat listed there.
 
 ## Running the pipeline
 
 ```bash
-uv run python -m src.ingest                          # fetch history
-uv run python -m src.preprocess                      # chunking
-uv run python -m src.index                           # indexing
+uv run python -m src.ingest   # fetch history for every chat in config.CHATS
+```
+
+Full from-scratch collection for one new chat (costs tokens — see
+`src/knowledge.py`'s module docstring) is a few function calls, not a single
+CLI command — see `notebooks/explore.ipynb`, or a throwaway script like:
+
+```python
+from src.knowledge import distill_chat
+from src.eval_knowledge import eval_precision, _load_knowledge, _threads_by_root
+from src.fix_knowledge import fix_batch, save_fixed
+from src.update_knowledge import bootstrap_state
+
+username = "some_chat"
+distill_chat(username, write=True, resume=True, checkpoint_every=100)
+judged = eval_precision(username, write=True)
+result = fix_batch(_load_knowledge(username), judged, _threads_by_root(username))
+save_fixed(username, result)
+bootstrap_state(username)  # seed the cursor so weekly_pipeline doesn't redo all of this
+```
+
+Then, or for the existing chats:
+
+```bash
+uv run python -m src.index                           # embed + index everything
 uv run python -m src.retrieve "как открыть ип"       # test retrieval
 uv run python -m src.rag "какие документы для ип"    # test answer
 uv run python -m src.bot                             # start the bot
 ```
 
-> The example queries are in Russian on purpose — they must match the
-> Russian-language content of the chats.
+## Keeping the knowledge fresh
+
+`scripts/weekly_update.sh` runs `src.weekly_pipeline`, syncs the updated
+`chroma_db/` to the production server, and restarts the bot service — all in
+one shot. It's scheduled via a macOS launchd job
+(`~/Library/LaunchAgents/com.georgia-rag.weekly-update.plist`), every Monday
+04:00; if the Mac is asleep at that time, launchd runs it on next wake
+instead of skipping it. Logs land in `data/logs/`.
+
+Because both `update_knowledge` and `index` are incremental, a normal weekly
+run costs roughly $0.30-1.30 (measured), not a full from-scratch redo.
+
+## Evaluation
+
+```bash
+uv run python -m src.eval_retrieval [--limit N] [--category C]
+uv run python -m src.eval_rag [--limit N] [--category C]
+```
+
+Golden set: `eval/golden_queries.jsonl` (tracked in git, unlike `data/`),
+hand-curated across every configured chat. The `critical` category
+(subtypes documented per-row) covers questions where a confident wrong
+answer is genuinely costly — legal/medical/financial — and is reported
+separately, never folded into an overall pass rate.
 
 ## Exploration notebook
 
-To inspect each pipeline step by hand:
-
 ```bash
-uv run jupyter lab
+uv run jupyter lab   # then open notebooks/explore.ipynb
 ```
 
-Then open `notebooks/explore.ipynb`.
+Walks through every pipeline step by hand, plus the retrieval/RAG eval demo
+with metrics explained inline.
+
+## Deployment
+
+The bot runs as a systemd service (`georgia-bot`) on a small Ubuntu VPS —
+only `src/`, `config.py`, `chroma_db/`, and a minimal `.env` (bot + model
+keys, no Telegram-ingestion credentials) are deployed there; collection
+stays local. Redeploy:
+
+```bash
+rsync -az --exclude='.venv' --exclude='__pycache__' --exclude='.git' \
+  --exclude='data' --exclude='notebooks' --exclude='eval' \
+  --exclude='*.session*' --exclude='.env' \
+  ./ root@<server>:/opt/telegram-georgia-rag/
+ssh root@<server> "systemctl restart georgia-bot"
+```
 
 ## ⚠️ Privacy
 
-The chats contain real people's personal data. The `data/`, `chroma_db/`
-directories and the `.env` file are listed in `.gitignore` — **do not commit
-them** to a public repository.
+The chats contain real people's personal data. `data/`, `chroma_db/`, and
+`.env` are gitignored — **never commit them**. `.env.example` must only ever
+contain placeholder values, never a real phone number/key/token.
