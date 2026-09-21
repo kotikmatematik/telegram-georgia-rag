@@ -1,0 +1,12 @@
+# Deployed to /etc/logrotate.d/georgia-bot on the server. Without this,
+# /var/log/georgia-bot.log (StandardOutput/StandardError target in the
+# systemd unit) grows forever.
+/var/log/georgia-bot.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

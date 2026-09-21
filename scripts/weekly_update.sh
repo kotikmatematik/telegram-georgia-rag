@@ -18,8 +18,8 @@ LOG="$LOG_DIR/weekly_update_$(date +%Y%m%d_%H%M%S).log"
     echo "=== weekly update started $(date) ==="
     uv run python -m src.weekly_pipeline
     echo "=== syncing chroma_db to server ==="
-    rsync -az chroma_db/ root@173.249.40.224:/opt/telegram-georgia-rag/chroma_db/
+    rsync -az chroma_db/ deploy@173.249.40.224:/opt/telegram-georgia-rag/chroma_db/
     echo "=== restarting bot ==="
-    ssh root@173.249.40.224 "systemctl restart georgia-bot"
+    ssh deploy@173.249.40.224 "sudo systemctl restart georgia-bot"
     echo "=== weekly update finished $(date) ==="
 } >> "$LOG" 2>&1

@@ -145,18 +145,23 @@ with metrics explained inline.
 
 ## Deployment
 
-The bot runs as a systemd service (`georgia-bot`) on a small Ubuntu VPS —
-only `src/`, `config.py`, `chroma_db/`, and a minimal `.env` (bot + model
-keys, no Telegram-ingestion credentials) are deployed there; collection
-stays local. Redeploy:
+The bot runs as a systemd service (`georgia-bot`, under a dedicated
+non-root `deploy` user — not root) on a small Ubuntu VPS — only `src/`,
+`config.py`, `chroma_db/`, and a minimal `.env` (bot + model keys, no
+Telegram-ingestion credentials) are deployed there; collection stays local.
+The server itself: SSH is key-only, no root login, `ufw` allows only SSH
+in, `fail2ban` is on. Redeploy:
 
 ```bash
 rsync -az --exclude='.venv' --exclude='__pycache__' --exclude='.git' \
   --exclude='data' --exclude='notebooks' --exclude='eval' \
   --exclude='*.session*' --exclude='.env' \
-  ./ root@<server>:/opt/telegram-georgia-rag/
-ssh root@<server> "systemctl restart georgia-bot"
+  ./ deploy@<server>:/opt/telegram-georgia-rag/
+ssh deploy@<server> "sudo systemctl restart georgia-bot"
 ```
+
+(`deploy` has a narrowly-scoped passwordless sudo rule — only
+`systemctl {restart,status,is-active} georgia-bot`, nothing else.)
 
 ## ⚠️ Privacy
 
