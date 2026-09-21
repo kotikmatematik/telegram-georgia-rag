@@ -8,6 +8,7 @@ import html
 import re
 import sys
 from datetime import datetime
+from urllib.parse import urlparse
 
 import config
 from src.retrieve import search
@@ -24,25 +25,35 @@ from src.store import openai_client
 # THIS step is where date_based/vote_based semantics actually get applied.
 SYSTEM_PROMPT = (
     "Ты — ассистент по жизни в Грузии. Отвечай на русском, опираясь В ПЕРВУЮ "
-    "ОЧЕРЕДЬ на приведённые ниже фрагменты знаний, извлечённые и проверенные "
-    "из Telegram-чатов. Это мнения и опыт людей из чатов, а не официальные "
-    "источники — при необходимости делай оговорку.\n\n"
+    "ОЧЕРЕДЬ на приведённые ниже фрагменты знаний из Telegram-чатов. Это "
+    "мнения и опыт людей из чатов, а не официальные источники — при "
+    "необходимости делай оговорку.\n\n"
     "ВСЕ фрагменты — про Грузию. Ретрив ищет по смыслу и может по ошибке "
     "подложить грузинский фрагмент на вопрос про ДРУГУЮ страну (совпадает "
     "тема — «права», «страховка» — но не страна). Если вопрос на самом деле "
     "про то, как что-то устроено в ДРУГОЙ стране — НЕ выдавай грузинские "
     "факты за ответ на него, даже если фрагмент выглядит подходящим по "
-    "теме; честно скажи, что чаты только про Грузию и этого вопроса они не "
-    "касаются. Но если вопрос по сути про жизнь В Грузии, а другая страна "
-    "лишь упомянута как пункт назначения/контрагент (например «как "
+    "теме, и НЕ отвечай по существу своими общими знаниями об этой другой "
+    "стране (даже с маркером [?] — правило про общие знания ниже сюда не "
+    "относится); честно скажи, что чаты только про Грузию и этого вопроса "
+    "они не касаются. Но если вопрос по сути про жизнь В Грузии, а другая "
+    "страна лишь упомянута как пункт назначения/контрагент (например «как "
     "перевести деньги из Грузии в Испанию», «работают ли грузинские карты "
     "за границей») — отвечай как обычно.\n\n"
     "Если фрагменты НЕ отвечают на вопрос (совсем или частично) — по "
-    "оставшейся части коротко ответь из своих общих знаний, БЕЗ выдумывания "
-    "фактов, которых не знаешь. Такой ответ явно отдели фразой вроде "
-    "«В чатах такого не обсуждали, но в целом известно, что...» — не выдавай "
-    "общие знания за опыт чата. Если и общих знаний нет — честно скажи, что "
-    "не нашла ответа.\n\n"
+    "оставшейся части коротко ответь из своих общих знаний. КАЖДЫЙ такой "
+    "факт — даже одна деталь (место, документ, срок, причина) внутри "
+    "предложения, где остальное взято из фрагмента — сразу помечай "
+    "маркером [?] вместо номера фрагмента; пометка «это общее знание, не "
+    "из чата» подставится в текст автоматически, вступление вроде «в "
+    "целом известно» писать не нужно. Не пиши «в чатах нет» — пиши «в "
+    "этих фрагментах нет», ты видишь не весь чат, а то, что нашёл поиск. "
+    "ИСКЛЮЧЕНИЕ — медицина/здоровье: используй ТОЛЬКО факты из "
+    "фрагментов, ничего от себя не добавляй (даже с маркером [?]) — ни "
+    "протоколов первой помощи, ни советов про срочность/врача/анализы. "
+    "Если фрагментов не хватает для полного ответа — просто добавь одну "
+    "фразу: «Рекомендуем обратиться к врачу.» — без деталей. Если "
+    "сказать нечего вообще — честно признай, что не нашла ответа.\n\n"
     "У каждого фрагмента указан тип:\n"
     "- date_based — со временем меняется (цены, официальные требования). "
     "Если несколько фрагментов дают разные значения — доверяй более "
@@ -57,8 +68,8 @@ SYSTEM_PROMPT = (
     "взято из фрагмента, поставь номер этого фрагмента в квадратных скобках "
     "— например: «через приложение Metro Georgia [2]». В скобках — ТОЛЬКО "
     "число. Несколько фрагментов подряд — [2][4]. Ссылку и дату сам не "
-    "пиши — подставятся автоматически по номеру. Общие знания (не из "
-    "фрагментов) номера не получают.\n\n"
+    "пиши — подставятся автоматически по номеру. Факт из общих знаний "
+    "(не из фрагментов) получает [?] вместо номера — см. выше.\n\n"
     "Если упоминаешь ссылку/чат/сайт как часть содержания ответа (не как "
     "цитирование фрагмента) — пиши её обычным текстом как есть, НИКОГДА не "
     "в виде markdown-ссылки [текст](url)."
@@ -77,6 +88,15 @@ SYSTEM_PROMPT = (
 # leaving a raw, unprocessed bracket in the answer.
 _CITE_RX = re.compile(r"(?:\[\d+[^\[\]]*\])+")
 _CITE_NUM_RX = re.compile(r"\[(\d+)")
+# General-knowledge marker: the model tags a fact that ISN'T from a fragment
+# with [?] instead of composing its own "in general it's known that..."
+# transition every time — same reasoning as _format_date: delegating the
+# marking itself to code is more reliable than trusting free-text compliance
+# (see chat history: the model reliably marks whole paragraphs this way but
+# was inconsistent about marking a single unsupported detail inside an
+# otherwise fragment-grounded sentence).
+_GK_RX = re.compile(r"\[\?\]")
+_GK_MARKER = " (общее знание, не из чата)"
 
 
 _MONTHS_RU = [
@@ -118,6 +138,7 @@ def _inline_citations(text: str, hits: list[dict]) -> tuple[str, list[dict]]:
                 parts.append(f"({lock}{m_['link']}{f', {date}' if date else ''})")
         return f" {' '.join(parts)}" if parts else ""
 
+    text = _GK_RX.sub(_GK_MARKER, text)
     text = _CITE_RX.sub(repl, text)
     text = re.sub(r"[ \t]{2,}", " ", text)  # citation markers leave a double space behind
 
@@ -139,13 +160,33 @@ _BOLD_RX = re.compile(r"\*\*(.+?)\*\*")
 _URL_TRAILING_PUNCT = ".,!?;:)]"  # sentence punctuation right after a bare URL isn't part of it
 
 
+def _link_text_for_url(url: str) -> str:
+    """What to show as the clickable word for a URL, instead of a generic
+    "ссылка" that gives the reader no idea what's behind it. A t.me link
+    always identifies its own chat by construction (see src/ingest.py::
+    _chat_link — public: /<username>/, private: /c/<internal_id>/), so this
+    needs no metadata beyond config.CHATS, and works for BOTH the citation
+    links _inline_citations adds AND any chat link the model wrote itself as
+    part of the answer's content (e.g. "чат https://t.me/paravaingeorgia").
+    A link to anything else (an external guide, a website) shows its domain
+    instead — still concrete, never the content-free "ссылка"."""
+    for chat in config.CHATS:
+        if chat.get("private"):
+            marker = f"t.me/c/{str(abs(chat['chat_id']))[3:]}/"
+        else:
+            marker = f"t.me/{chat['username']}"
+        if marker in url:
+            return chat["title"]
+    return urlparse(url).netloc or "ссылка"
+
+
 def _linkify(m: re.Match) -> str:
     url = m.group(0)
     trail = ""
     while url and url[-1] in _URL_TRAILING_PUNCT:
         trail = url[-1] + trail
         url = url[:-1]
-    return f'<a href="{url}">ссылка</a>{trail}'
+    return f'<a href="{url}">{_link_text_for_url(url)}</a>{trail}'
 
 
 def to_telegram_html(text: str) -> str:
@@ -201,10 +242,13 @@ def answer(query: str, k: int = config.TOP_K) -> dict:
     else:
         kwargs["temperature"] = 0.2
     resp = client.chat.completions.create(**kwargs)
-    text = resp.choices[0].message.content or ""
+    raw_text = resp.choices[0].message.content or ""
 
-    text, sources = _inline_citations(text, hits)
-    return {"answer": text, "sources": sources}
+    text, sources = _inline_citations(raw_text, hits)
+    # raw_text (model's own [N]-marker output, before link substitution) is
+    # for eval (src/eval_rag.py) to inspect citation-format compliance —
+    # bot.py and the notebook only ever read "answer"/"sources".
+    return {"answer": text, "sources": sources, "raw_text": raw_text}
 
 
 def main() -> None:

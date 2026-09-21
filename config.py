@@ -15,8 +15,15 @@ DATA_DIR = ROOT / "data"
 RAW_DIR = DATA_DIR / "raw"              # raw messages: data/raw/<chat>.jsonl
 KNOWLEDGE_DIR = DATA_DIR / "knowledge"  # distilled Q&A: data/knowledge/<chat>.jsonl
 CHROMA_DIR = ROOT / "chroma_db"         # persistent vector DB
+# eval/ (repo root, tracked in git) holds the hand-curated golden query set —
+# data/ is entirely gitignored (real chat content), so it can't live there.
+# data/eval/ (gitignored, created below) holds run OUTPUTS (judged .jsonl
+# dumps, which do contain real chat excerpts) — see src/eval_retrieval.py,
+# src/eval_rag.py.
+EVAL_DIR = ROOT / "eval"
+EVAL_DATA_DIR = DATA_DIR / "eval"
 
-for _d in (RAW_DIR, KNOWLEDGE_DIR):
+for _d in (RAW_DIR, KNOWLEDGE_DIR, EVAL_DATA_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # --- Secrets ---
@@ -169,14 +176,26 @@ CHUNK_MAX_GAP_MINUTES = 10   # src/threads.py: gap that starts a new time-burst
 # unrelated messages into one giant "thread". Does not affect reply-based
 # links, which are never capped.
 THREAD_MAX_BURST_SIZE = 50
-TOP_K = 8                    # how many knowledge units to feed into the LLM context
-# Below this cosine score a hit is noise, not a real match — measured on
-# helpgeorgia: a genuine match scores 0.7+ and drops sharply after; a query
-# with NO real answer in the base still returns hits, but all clustered
-# 0.38-0.50 with no clear top pick. 0.5 cuts that noise while keeping
-# legitimate secondary sources (e.g. a real second source scored 0.57).
-RETRIEVAL_MIN_SCORE = 0.5
+# TOP_K / RETRIEVAL_MIN_SCORE — tuned via src.eval_retrieval's (k, threshold)
+# grid sweep on eval/golden_queries.jsonl (53 questions across all chats,
+# 2026-09-21): k=6/thr=0.55 gave the best recall/precision balance without
+# ever losing a critical-category source (critical_hit_rate=1.0) or leaking a
+# false positive on a no-answer question (no_answer_leak=0), while explicitly
+# favoring recall (missing a real secondary opinion) over precision (some
+# noise) per project priority — see multi_source_sablet_search in the golden
+# set for a real case k=4 would have dropped. Re-run the sweep before
+# changing either value again; don't retune from a single anecdote.
+TOP_K = 6
+RETRIEVAL_MIN_SCORE = 0.55
 EMBED_BATCH = 100            # batch size for embedding requests
+
+# --- Retrieval + RAG evaluation (src/eval_retrieval.py, src/eval_rag.py) ---
+# Wider than TOP_K on purpose: eval_retrieval fetches this many candidates
+# ONCE per query (min_score=0.0) and then sweeps RETRIEVAL_EVAL_THRESHOLDS
+# over the cached, already-judged results — no re-querying/re-judging per
+# threshold, so the sweep itself costs zero extra API calls.
+RETRIEVAL_EVAL_K = 20
+RETRIEVAL_EVAL_THRESHOLDS = [0.0, 0.2, 0.3, 0.4, 0.45, 0.5, 0.55, 0.6, 0.7]
 
 # --- Chats ---
 # `username` is used to build t.me/<username>/<msg_id> source links (and as
@@ -193,10 +212,11 @@ CHATS = [
     {"username": "ipgeorgiachat", "chat_id": -1001670908431, "title": "ИП/Бизнес Грузия"},
     {"username": "nogotochki", "chat_id": -1001318697228, "title": "Ноготочки", "private": True},
     {"username": "paravaingeorgia", "chat_id": -1001512786455, "title": "Получение водительских прав в Грузии"},
-    # Uncomment to add more chats when scaling up:
-    # {"username": "mygeorgia_chat", "chat_id": -1001486751358, "title": "ГРУЗИЯ ЧАТ"},
-    # {"username": "tbilisi_girl", "chat_id": -1001549075106, "title": "Женский чат Тбилиси"},
-    # {"username": "georgia_it", "chat_id": -1001688709586, "title": "Грузия IT чат"},
-    # {"username": "gruzia_medicina", "chat_id": -1001781403833, "title": "Грузия медицина"},
-    # {"username": "georgia_woman", "chat_id": -1001276829180, "title": "Тбилиси женский чат"},
+    # Candidates being analyzed (spam ratio / thread yield) before committing
+    # to full distillation — see data/eval/chat_analysis.jsonl.
+    {"username": "mygeorgia_chat", "chat_id": -1001486751358, "title": "ГРУЗИЯ ЧАТ"},
+    {"username": "tbilisi_girl", "chat_id": -1001549075106, "title": "Женский чат Тбилиси"},
+    {"username": "georgia_it", "chat_id": -1001688709586, "title": "Грузия IT чат"},
+    {"username": "gruzia_medicina", "chat_id": -1001781403833, "title": "Грузия медицина"},
+    {"username": "georgia_woman", "chat_id": -1001276829180, "title": "Тбилиси женский чат"},
 ]

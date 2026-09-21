@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import chromadb
 from openai import OpenAI
@@ -10,27 +11,40 @@ import config
 
 _openai: OpenAI | None = None
 _chroma: chromadb.ClientAPI | None = None
+# Both clients are lazily created on first use and cached in the globals
+# above. That's safe under sequential use (the only pattern this file saw
+# until src/eval_retrieval.py and src/eval_rag.py started calling search()/
+# chat_json() from a ThreadPoolExecutor) but not under concurrent first-use:
+# multiple threads could all see the global as None and race to construct
+# it — for chromadb.PersistentClient specifically, that race corrupts its
+# tenant validation (observed directly: "Could not connect to tenant
+# default_tenant" on the very first eval_retrieval run). This lock makes
+# that lazy init atomic; it's only ever held for the cheap one-time
+# construction, not for every call.
+_client_lock = threading.Lock()
 
 
 def openai_client() -> OpenAI:
     global _openai
     if _openai is None:
-        if config.USE_AZURE_OPENAI:
-            if not (config.AZURE_OPENAI_ENDPOINT and config.AZURE_OPENAI_API_KEY):
-                raise SystemExit(
-                    "AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY are not set in .env "
-                    "(config.USE_AZURE_OPENAI is True)"
-                )
-            # Azure's v1-compatible surface: plain OpenAI client, just a
-            # different base_url — no AzureOpenAI class / api_version needed.
-            _openai = OpenAI(
-                api_key=config.AZURE_OPENAI_API_KEY,
-                base_url=config.AZURE_OPENAI_ENDPOINT,
-            )
-        else:
-            if not config.OPENAI_API_KEY:
-                raise SystemExit("OPENAI_API_KEY is not set in .env")
-            _openai = OpenAI(api_key=config.OPENAI_API_KEY)
+        with _client_lock:
+            if _openai is None:  # re-check: another thread may have won the race
+                if config.USE_AZURE_OPENAI:
+                    if not (config.AZURE_OPENAI_ENDPOINT and config.AZURE_OPENAI_API_KEY):
+                        raise SystemExit(
+                            "AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_API_KEY are not set in .env "
+                            "(config.USE_AZURE_OPENAI is True)"
+                        )
+                    # Azure's v1-compatible surface: plain OpenAI client, just a
+                    # different base_url — no AzureOpenAI class / api_version needed.
+                    _openai = OpenAI(
+                        api_key=config.AZURE_OPENAI_API_KEY,
+                        base_url=config.AZURE_OPENAI_ENDPOINT,
+                    )
+                else:
+                    if not config.OPENAI_API_KEY:
+                        raise SystemExit("OPENAI_API_KEY is not set in .env")
+                    _openai = OpenAI(api_key=config.OPENAI_API_KEY)
     return _openai
 
 
@@ -91,7 +105,9 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 def get_collection():
     global _chroma
     if _chroma is None:
-        _chroma = chromadb.PersistentClient(path=str(config.CHROMA_DIR))
+        with _client_lock:
+            if _chroma is None:  # re-check: another thread may have won the race
+                _chroma = chromadb.PersistentClient(path=str(config.CHROMA_DIR))
     return _chroma.get_or_create_collection(
         name=config.COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
     )
