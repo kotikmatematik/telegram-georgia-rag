@@ -111,12 +111,17 @@ uv run python -m src.bot                             # start the bot
 
 ## Keeping the knowledge fresh
 
-`scripts/weekly_update.sh` runs `src.weekly_pipeline`, syncs the updated
-`chroma_db/` to the production server, and restarts the bot service — all in
-one shot. It's scheduled via a macOS launchd job
-(`~/Library/LaunchAgents/com.georgia-rag.weekly-update.plist`), every Monday
-04:00; if the Mac is asleep at that time, launchd runs it on next wake
-instead of skipping it. Logs land in `data/logs/`.
+Collection runs directly on the production server (not a local machine) —
+`georgia_ingest.session`, `data/raw/`, and `data/knowledge/` all live there
+now, so nothing depends on any laptop being on. `scripts/georgia-weekly.service`
++ `scripts/georgia-weekly.timer` (deployed to `/etc/systemd/system/`) run
+`src.weekly_pipeline` every Monday 04:00 (+ up to 5min random delay) and
+restart the bot service afterward. Logs: `data/logs/weekly_update.log` on
+the server. Check it any time with:
+
+```bash
+ssh deploy@<server> "systemctl list-timers georgia-weekly.timer; tail -30 /opt/telegram-georgia-rag/data/logs/weekly_update.log"
+```
 
 Because both `update_knowledge` and `index` are incremental, a normal weekly
 run costs roughly $0.30-1.30 (measured), not a full from-scratch redo.
@@ -146,11 +151,16 @@ with metrics explained inline.
 ## Deployment
 
 The bot runs as a systemd service (`georgia-bot`, under a dedicated
-non-root `deploy` user — not root) on a small Ubuntu VPS — only `src/`,
-`config.py`, `chroma_db/`, and a minimal `.env` (bot + model keys, no
-Telegram-ingestion credentials) are deployed there; collection stays local.
-The server itself: SSH is key-only, no root login, `ufw` allows only SSH
-in, `fail2ban` is on. Redeploy:
+non-root `deploy` user — not root) on a small Ubuntu VPS, which also runs
+collection itself (see above) — `.env` there additionally carries the
+`TELEGRAM_API_ID`/`TELEGRAM_API_HASH`/`TELEGRAM_PHONE` used by
+`georgia_ingest.session`. That session file grants full access to that
+Telegram account (not just bot-scoped access), which is the real reason the
+server's baseline hardening matters: SSH is key-only, no root login, `ufw`
+allows only SSH in, `fail2ban` bans repeat auth failures and pings Telegram
+on every ban (see `scripts/notify_ban.sh`), and the bot service crashing
+also pings Telegram (`scripts/notify_on_failure.sh`, wired via
+`ExecStopPost=`). Code redeploy (collection data isn't touched by this):
 
 ```bash
 rsync -az --exclude='.venv' --exclude='__pycache__' --exclude='.git' \

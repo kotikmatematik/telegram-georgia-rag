@@ -69,7 +69,12 @@ SYSTEM_PROMPT = (
     "город — Тбилиси, Батуми или другой?»), а «не нашла...» в этом случае "
     "вообще не пиши — не пугай пользователя ложным отказом, если дело "
     "просто в недостающей детали; пиши «не нашла» только если знаний "
-    "действительно не хватает и уточнение не поможет.\n\n"
+    "действительно не хватает и уточнение не поможет. ИСКЛЮЧЕНИЕ: если "
+    "недостающая деталь — именно город, а ниже дан «город пользователя по "
+    "умолчанию» — НЕ переспрашивай город, сразу отвечай для этого города и "
+    "поставь маркер [CITY] один раз в конце ответа (подставится "
+    "автоматически); не ставь [CITY], если в самом вопросе уже назван "
+    "другой город, или вопрос вообще не про конкретное место.\n\n"
     "ИСКЛЮЧЕНИЕ — медицина/здоровье: используй ТОЛЬКО факты из "
     "фрагментов, ничего от себя не добавляй (даже с маркером [?]) — ни "
     "протоколов первой помощи, ни советов про срочность/врача/анализы. "
@@ -119,6 +124,13 @@ _CITE_NUM_RX = re.compile(r"\[(\d+)")
 # otherwise fragment-grounded sentence).
 _GK_RX = re.compile(r"\[\?\]")
 _GK_MARKER = " (не из чата)"
+
+# Same "delegate the marking to code, not free text" pattern, for the
+# per-user default-city feature (src/bot.py's /city) — the model signals
+# "I answered for the default city instead of asking" with a fixed [CITY]
+# token; the actual city name/footnote is filled in here since the model
+# never even sees the mechanism, only the city name itself (see answer()).
+_CITY_MARKER_RX = re.compile(r"\[CITY\]")
 
 
 _MONTHS_RU = [
@@ -176,6 +188,19 @@ def _inline_citations(text: str, hits: list[dict]) -> tuple[str, list[dict]]:
             seen.add(m_["link"])
     return text, sources
 
+
+# Detects src.knowledge._mask_contacts's placeholders (baked into stored
+# knowledge at collection time, not something rag.py itself masks) — a bare
+# "@username" or a run of X's standing in for a real phone number reads as
+# broken/suspicious if the reader doesn't know it's deliberate privacy
+# masking, not a redaction of something wrong. One short footnote, only when
+# an answer actually contains one — same "annotate only when it fires"
+# pattern as _GK_MARKER above.
+_MASKED_CONTACT_RX = re.compile(r"@username\b|X{9,}")
+_MASKED_CONTACT_NOTE = (
+    "\n\n🙈 Контакты (телефон/юзернейм) иногда скрыты — так безопаснее "
+    "для тех, кто их оставлял в чате."
+)
 
 _URL_RX = re.compile(r"https?://\S+")
 _BOLD_RX = re.compile(r"\*\*(.+?)\*\*")
@@ -254,6 +279,8 @@ def to_telegram_html(text: str) -> str:
     for i, html_snippet in enumerate(placeholders):
         escaped = escaped.replace(f"\x00{i}\x00", html_snippet)
     escaped = _BOLD_RX.sub(r"<b>\1</b>", escaped)
+    if _MASKED_CONTACT_RX.search(escaped):
+        escaped += _MASKED_CONTACT_NOTE
     return escaped
 
 
@@ -305,12 +332,22 @@ def _rewrite_query(message: str, history: list[dict]) -> str:
     return (data.get("query") or "").strip() or message
 
 
-def answer(query: str, k: int = config.TOP_K, *, history: list[dict] | None = None) -> dict:
+def answer(
+    query: str, k: int = config.TOP_K, *,
+    history: list[dict] | None = None, user_city: str | None = None,
+) -> dict:
     """history, if given, is the recent conversation as
     [{"role": "user"|"assistant", "content": "..."}, ...] (oldest first) —
     used only to resolve a short follow-up into a standalone question before
     retrieval; the answer itself is still generated fresh from fragments,
-    not from the conversation."""
+    not from the conversation.
+
+    user_city, if given (src.bot's /city preference), lets the model skip
+    the "which city?" clarifying question and answer for that city instead
+    — see the [CITY] marker handling below and SYSTEM_PROMPT's ИСКЛЮЧЕНИЕ
+    clause. Not injected into search_query itself: a city-specific question
+    already names its city and should retrieve on that, not the user's
+    default; this only fills in a city the QUESTION left unspecified."""
     search_query = _rewrite_query(query, history) if history else query
     hits = search(search_query, k=k)
     # No hits now usually means "nothing relevant enough" (min_score filtered
@@ -318,8 +355,9 @@ def answer(query: str, k: int = config.TOP_K, *, history: list[dict] | None = No
     # with no fragments it falls straight to the general-knowledge branch of
     # SYSTEM_PROMPT instead of a hardcoded "not found".
     context = _build_context(hits) if hits else "(пусто — по этому вопросу в чатах ничего релевантного не нашлось)"
+    city_line = f"\nГород пользователя по умолчанию: {user_city}." if user_city else ""
     user_prompt = (
-        f"Вопрос: {search_query}\n\n"
+        f"Вопрос: {search_query}{city_line}\n\n"
         f"Фрагменты переписок:\n{context}\n\n"
         f"Дай ответ по существу, помечая каждый факт номером фрагмента в "
         f"квадратных скобках сразу после него (см. ЦИТИРОВАНИЕ выше)."
@@ -342,6 +380,9 @@ def answer(query: str, k: int = config.TOP_K, *, history: list[dict] | None = No
     raw_text = resp.choices[0].message.content or ""
 
     text, sources = _inline_citations(raw_text, hits)
+    if user_city and _CITY_MARKER_RX.search(text):
+        text = _CITY_MARKER_RX.sub("", text).rstrip()
+        text += f"\n\n📍 Ответ для города по умолчанию — {user_city}. Сменить: /city"
     # raw_text (model's own [N]-marker output, before link substitution) is
     # for eval (src/eval_rag.py) to inspect citation-format compliance —
     # bot.py and the notebook only ever read "answer"/"sources".

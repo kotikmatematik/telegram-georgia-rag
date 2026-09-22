@@ -1,0 +1,11 @@
+# Deployed to /etc/systemd/system/georgia-weekly.timer on the server.
+[Unit]
+Description=Run georgia-weekly.service every Monday 04:00
+
+[Timer]
+OnCalendar=Mon *-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,17 @@
+# Deployed to /etc/systemd/system/georgia-weekly.service on the server.
+# Runs the incremental knowledge refresh (src.weekly_pipeline) in place —
+# collection now happens ON the server (Telegram session + data/ live there
+# too), not on a local machine synced up afterward. Triggered by
+# georgia-weekly.timer, every Monday 04:00 (+ up to 5min random delay).
+[Unit]
+Description=Georgia RAG weekly knowledge refresh
+
+[Service]
+Type=oneshot
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/telegram-georgia-rag
+ExecStart=/usr/local/bin/uv run python -u -m src.weekly_pipeline
+ExecStartPost=/usr/bin/sudo /usr/bin/systemctl restart georgia-bot
+StandardOutput=append:/opt/telegram-georgia-rag/data/logs/weekly_update.log
+StandardError=append:/opt/telegram-georgia-rag/data/logs/weekly_update.log

@@ -1,7 +1,8 @@
 """Incremental knowledge refresh for ALL configured chats — the recurring
 "pull new messages, distill new/changed threads, re-embed" job (see
 config.REPROCESS_OVERLAP_DAYS and src.update_knowledge). Meant to run on a
-schedule (see scripts/weekly_update.sh + the launchd job that calls it), not
+schedule on the server itself (see scripts/georgia-weekly.service +
+scripts/georgia-weekly.timer, deployed under /etc/systemd/system/), not
 manually per chat like the one-off full_pipeline scripts used for the
 initial from-scratch collection of a new chat.
 
