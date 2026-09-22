@@ -55,9 +55,10 @@ User message → rag (retrieve + generate + cite) → bot (Telegram) → answer
   citations, resolve short follow-ups against conversation history
   (`_rewrite_query`), render Telegram HTML with real source links.
 - **`src/bot.py`** — the Telegram interface (aiogram): text questions, voice
-  messages (transcribed via Whisper), inline mode (`@bot вопрос` in any
-  chat, no need to add the bot there), per-user daily rate limit, and a
-  JSONL interaction log for analytics/future eval-set growth.
+  messages (transcribed via Groq's hosted Whisper, free tier), inline mode
+  (`@bot вопрос` in any chat, no need to add the bot there), per-user daily
+  rate limit, and a JSONL interaction log for analytics/future eval-set
+  growth.
 - **`src/eval_retrieval.py`** / **`src/eval_rag.py`** — a from-scratch
   evaluation harness (not ragas) against `eval/golden_queries.jsonl`: sweeps
   `(k, threshold)` for retrieval, judges faithfulness/relevance/hallucination

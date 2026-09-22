@@ -28,6 +28,7 @@ for _d in (RAW_DIR, KNOWLEDGE_DIR, EVAL_DATA_DIR):
 
 # --- Secrets ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
@@ -68,11 +69,11 @@ EMBED_MODEL = "text-embedding-3-small"
 CHAT_MODEL = "gpt-4o-mini"  # kept as the "old model" reference value for reverts below
 
 # Voice message transcription (src/bot.py voice handler, via
-# src.store.transcribe_audio) — ALWAYS via direct OpenAI (api.openai.com),
-# never Azure: the Azure resource in use has no Whisper/transcribe
-# deployment (verified — every whisper/gpt-*-transcribe name 404s there).
-# Not affected by USE_AZURE_OPENAI/azure_deployment().
-TRANSCRIBE_MODEL = "whisper-1"
+# src.store.transcribe_audio) — via Groq's Whisper API (free tier, no card
+# needed), NOT Azure (no Whisper deployment there — every whisper/
+# gpt-*-transcribe name 404s) and not OpenAI direct (that account has no
+# balance). Not affected by USE_AZURE_OPENAI/azure_deployment().
+TRANSCRIBE_MODEL = "whisper-large-v3-turbo"
 
 # Final answer generation (src/rag.py) — the live, user-facing step. Reasoning
 # effort kept low: this runs synchronously per user question (unlike the
@@ -142,7 +143,7 @@ COLLECTION_NAME = "georgia_chats"
 # are still fetched, but only to serve as reply-parents / context for threads
 # that have activity after the cutoff (see src/knowledge.py). Empty string =
 # no date cutoff (fall back to INGEST_LIMIT alone).
-INGEST_SINCE = "2025-03-01"       # ISO date; revisit when type-based ranking lands
+INGEST_SINCE = "2024-01-01"       # ISO date; revisit when type-based ranking lands
 INGEST_PARENT_LOOKBACK_DAYS = 30  # extra history before the cutoff, parents only
 INGEST_LIMIT = 50000              # safety cap on messages fetched per chat per run
 

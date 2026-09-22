@@ -103,37 +103,38 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     return out
 
 
-_openai_direct: OpenAI | None = None
+_groq: OpenAI | None = None
 
 
-def _openai_direct_client() -> OpenAI:
-    """A plain OpenAI() client on config.OPENAI_API_KEY, bypassing
-    USE_AZURE_OPENAI entirely. Separate from openai_client() because the
-    Azure resource currently in use (friend's credits) has no Whisper/
-    transcription deployment — verified directly: every whisper/
-    gpt-*-transcribe model name 404s there with DeploymentNotFound, while
-    OPENAI_API_KEY against api.openai.com works. So voice transcription
-    always goes to OpenAI direct, regardless of which endpoint text
-    generation/embeddings use."""
-    global _openai_direct
-    if _openai_direct is None:
+def _groq_client() -> OpenAI:
+    """A plain OpenAI()-shaped client pointed at Groq's OpenAI-compatible
+    endpoint, used only for voice transcription. Separate from
+    openai_client() because neither of the other two paths work for this:
+    the Azure resource in use has no Whisper/transcription deployment
+    (verified — every whisper/gpt-*-transcribe name 404s with
+    DeploymentNotFound there), and the OpenAI-direct account has no
+    balance. Groq hosts open-weight Whisper (whisper-large-v3-turbo) with a
+    free tier (no card required), and its API is OpenAI-compatible — same
+    client class, just a different base_url/key."""
+    global _groq
+    if _groq is None:
         with _client_lock:
-            if _openai_direct is None:
-                if not config.OPENAI_API_KEY:
+            if _groq is None:
+                if not config.GROQ_API_KEY:
                     raise SystemExit(
-                        "OPENAI_API_KEY is not set in .env (needed for voice "
-                        "transcription — the Azure resource has no Whisper deployment)"
+                        "GROQ_API_KEY is not set in .env (needed for voice "
+                        "transcription — free key at https://console.groq.com/keys)"
                     )
-                _openai_direct = OpenAI(api_key=config.OPENAI_API_KEY)
-    return _openai_direct
+                _groq = OpenAI(api_key=config.GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+    return _groq
 
 
 def transcribe_audio(file_bytes: bytes, filename: str = "voice.ogg") -> str:
-    """Speech-to-text via OpenAI's Whisper API (see _openai_direct_client
-    above). filename's extension is a format hint the SDK reads off
-    file.name for the multipart upload — Telegram voice messages are .ogg
-    (Opus), which Whisper accepts directly, no conversion needed."""
-    client = _openai_direct_client()
+    """Speech-to-text via Groq's hosted Whisper (see _groq_client above).
+    filename's extension is a format hint the SDK reads off file.name for
+    the multipart upload — Telegram voice messages are .ogg (Opus), which
+    Whisper accepts directly, no conversion needed."""
+    client = _groq_client()
     buf = io.BytesIO(file_bytes)
     buf.name = filename
     resp = client.audio.transcriptions.create(model=config.TRANSCRIBE_MODEL, file=buf)
