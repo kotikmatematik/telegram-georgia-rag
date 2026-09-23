@@ -5,6 +5,7 @@ Run:  uv run python -m src.rag "какие документы нужны для 
 from __future__ import annotations
 
 import html
+import json
 import re
 import sys
 from datetime import datetime
@@ -131,6 +132,51 @@ _GK_MARKER = " (не из чата)"
 # token; the actual city name/footnote is filled in here since the model
 # never even sees the mechanism, only the city name itself (see answer()).
 _CITY_MARKER_RX = re.compile(r"\[CITY\]")
+
+# Which cities are well-covered enough to be worth defaulting to — computed
+# from the ACTUAL knowledge base (not hardcoded), shared by src.bot's /city
+# picker and answer()'s own search-query city injection below. Lives here
+# (not in src/bot.py) so both can import it without a circular import —
+# src/bot.py already imports from src.rag, not the other way around.
+_CITY_MIN_COUNT = 5
+_NON_GEORGIAN_CITY_NOISE = {"Ереван", "Москва", "Владикавказ", "Санкт-Петербург", "Стамбул"}
+
+
+def _compute_city_counts() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for path in config.KNOWLEDGE_DIR.glob("*.fixed.jsonl"):
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                city = json.loads(line).get("city")
+                if city:
+                    counts[city] = counts.get(city, 0) + 1
+    return counts
+
+
+# Computed once at import — see src.bot's identical comment on why a fresh
+# count per request isn't worth it (data/knowledge only changes via the
+# weekly refresh job, which restarts this process anyway).
+_CITY_COUNTS = _compute_city_counts()
+_CITY_OPTIONS = [
+    c for c, n in sorted(_CITY_COUNTS.items(), key=lambda kv: -kv[1])
+    if n >= _CITY_MIN_COUNT and c not in _NON_GEORGIAN_CITY_NOISE
+]
+
+_GEORGIA_WIDE_RX = re.compile(r"[Гг]рузи[а-я]*")
+
+
+def _mentions_place(query: str) -> bool:
+    """True if the query already names a specific city (so injecting the
+    user's default would silently override an explicit different city) OR
+    asks about Georgia-wide/unspecified scope ("по всей Грузии", "в
+    Грузии") — a country-wide question shouldn't get narrowed to one city
+    either. Cheap substring/regex check, same style as the other
+    deterministic markers in this file — no extra LLM call."""
+    if _GEORGIA_WIDE_RX.search(query):
+        return True
+    return any(city in query for city in _CITY_OPTIONS)
 
 
 _MONTHS_RU = [
@@ -399,11 +445,20 @@ def answer(
     user_city, if given (src.bot's /city preference), lets the model skip
     the "which city?" clarifying question and answer for that city instead
     — see the [CITY] marker handling below and SYSTEM_PROMPT's ИСКЛЮЧЕНИЕ
-    clause. Not injected into search_query itself: a city-specific question
-    already names its city and should retrieve on that, not the user's
-    default; this only fills in a city the QUESTION left unspecified."""
+    clause. Also folded into the embedding query (see _mentions_place, and
+    embed_query below) when the question doesn't already name a city or ask
+    Georgia-wide — a bare
+    "где купить фанеру?" used to search blind across every city's fragments,
+    competing against Tbilisi-specific ones instead of being helped by
+    knowing the user is in Tbilisi; a question that already says "в Батуми"
+    or "по всей Грузии" is left alone so the default never overrides it."""
     search_query = _rewrite_query(query, history) if history else query
-    hits = search(search_query, k=k)
+    # Separate from search_query on purpose: search_query is also what goes
+    # into the generation prompt's "Вопрос:" line below (via city_line,
+    # already stating the default city there) — appending it twice would
+    # just be redundant, not wrong, but embed_query keeps that line clean.
+    embed_query = f"{search_query} {user_city}" if user_city and not _mentions_place(search_query) else search_query
+    hits = search(embed_query, k=k)
     # No hits now usually means "nothing relevant enough" (min_score filtered
     # everything out), not necessarily an empty index. Still call the model —
     # with no fragments it falls straight to the general-knowledge branch of

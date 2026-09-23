@@ -27,7 +27,7 @@ from aiogram.types import (
 )
 
 import config
-from src.rag import answer, classify_guest, to_telegram_html
+from src.rag import _CITY_COUNTS, _CITY_MIN_COUNT, _CITY_OPTIONS, answer, classify_guest, to_telegram_html
 from src.store import transcribe_audio
 
 logging.basicConfig(level=logging.INFO)
@@ -202,46 +202,13 @@ def _clear_history(chat_id: int) -> None:
 # nag again on /start); key absent entirely means "never asked yet".
 _CITY_PATH = config.DATA_DIR / "bot_user_city.json"
 
-# Which cities to offer is computed from the ACTUAL knowledge base, not a
-# hardcoded list — as more chats/threads get collected, the real spread of
-# well-covered cities shifts, and a hardcoded list would silently go stale.
-# A city needs at least this many tagged knowledge units to be offered at
-# all — below that, "answer for this city by default" wouldn't have enough
-# to actually work with most of the time.
-_CITY_MIN_COUNT = 5
-# The `city` field is LLM-tagged per knowledge unit and occasionally names a
-# place mentioned only as a travel destination/origin from a Georgia-based
-# thread ("дорога до Еревана из Тбилиси"), not a real city the BOT'S USER
-# could be based in — excluded even if it clears the count threshold above.
-_NON_GEORGIAN_CITY_NOISE = {"Ереван", "Москва", "Владикавказ", "Санкт-Петербург", "Стамбул"}
-# How many cities the /city keyboard shows at once — _CITY_OPTIONS itself
-# (below) can be longer; the rest are still valid /city <name> targets,
-# just not worth a dedicated button.
+# Which cities to offer — _CITY_OPTIONS/_CITY_COUNTS/_CITY_MIN_COUNT now
+# live in src/rag.py (shared with answer()'s own city injection into the
+# embedding query — see there for why). Just the keyboard-only knob here:
+# how many cities the /city button grid shows at once — _CITY_OPTIONS itself
+# can be longer; the rest are still valid /city <name> targets, just not
+# worth a dedicated button.
 _CITY_KEYBOARD_SIZE = 8
-
-
-def _compute_city_counts() -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for path in config.KNOWLEDGE_DIR.glob("*.fixed.jsonl"):
-        with path.open(encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                city = json.loads(line).get("city")
-                if city:
-                    counts[city] = counts.get(city, 0) + 1
-    return counts
-
-
-# Computed once at import (process start) — data/knowledge only actually
-# changes via the weekly refresh job, which restarts this bot process
-# anyway (see scripts/georgia-weekly.service), so a fresh count on every
-# request would just re-read the same ~20k lines for no benefit.
-_CITY_COUNTS = _compute_city_counts()
-_CITY_OPTIONS = [
-    c for c, n in sorted(_CITY_COUNTS.items(), key=lambda kv: -kv[1])
-    if n >= _CITY_MIN_COUNT and c not in _NON_GEORGIAN_CITY_NOISE
-]
 
 
 def _load_cities() -> dict[str, str]:
