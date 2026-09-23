@@ -332,6 +332,60 @@ def _rewrite_query(message: str, history: list[dict]) -> str:
     return (data.get("query") or "").strip() or message
 
 
+GUEST_CLASSIFY_SYSTEM = (
+    "Ты — фильтр для Telegram-бота, который отвечает на практические вопросы "
+    "о жизни в Грузии. Бота позвали в чужой чат (упомянули его или ответили "
+    "на его сообщение). Реши, просят ли бота о чём-то, и если да — "
+    "сформулируй самостоятельный вопрос.\n\n"
+    "Метки:\n"
+    "- request — у бота просят информацию или помощь. В ЛЮБОЙ форме: вопрос, "
+    "просьба («подскажи…»), или просто тема без глагола («рекомендации "
+    "лор-врачей», «виза», «банк для ИП») — голая тема после вызова бота = "
+    "просьба рассказать о ней. Если бота позвали ответом на чужое "
+    "сообщение (даже без своего текста) — считай, что просят помочь с темой "
+    "того сообщения. Ответ на предыдущее сообщение бота с уточнением, "
+    "продолжением или возражением («рабочая», «а в Батуми?», «а сколько "
+    "стоит?», «это устарело?») — тоже request.\n"
+    "- thanks — благодарность, согласие, реакция без новой просьбы "
+    "(«спасибо», «ок», «понял», «круто»).\n"
+    "- chatter — ответили на сообщение бота, но обращаются к другим людям "
+    "или просто комментируют/спорят, ничего не спрашивая у бота.\n"
+    "- mention — бота упомянули мимоходом (советуют кому-то, говорят о "
+    "боте), ни о чём его не прося.\n"
+    "Если сомневаешься между request и другой меткой — выбирай request.\n"
+    "Тема не про Грузию — всё равно request (это разберут дальше).\n\n"
+    "query — только для request: вопрос по-русски, понятный без контекста "
+    "переписки (подставь тему из сообщения, на которое ответили, или из "
+    "предыдущего ответа бота, если без них непонятно, о чём речь). Для "
+    "остальных меток — пустая строка.\n"
+    "Ответь строго JSON: {\"label\": \"...\", \"query\": \"...\"}"
+)
+
+
+def classify_guest(
+    text: str, replied_text: str | None = None, replied_is_bot: bool = False,
+) -> dict:
+    """Guest-mode gate (src.bot.on_guest_message): {"label": request|thanks|
+    chatter|mention, "query": standalone question or ""}. Doubles as the
+    follow-up rewrite for guest mode — there's no persisted history there
+    (guest chat ids can collide with other chats), only the one message the
+    caller replied to, so that message IS the history."""
+    parts = []
+    if replied_text:
+        who = "предыдущий ответ бота" if replied_is_bot else "сообщение другого человека"
+        parts.append(f"Сообщение, на которое ответили ({who}):\n{replied_text}")
+    parts.append(f"Сообщение, которым позвали бота:\n{text or '(пусто — только упоминание бота)'}")
+    data = chat_json(
+        config.GUEST_CLASSIFY_MODEL, GUEST_CLASSIFY_SYSTEM, "\n\n".join(parts),
+        reasoning_effort=config.GUEST_CLASSIFY_REASONING_EFFORT,
+    )
+    label = data.get("label") if data.get("label") in {"request", "thanks", "chatter", "mention"} else "request"
+    query = (data.get("query") or "").strip()
+    if label == "request" and not query:
+        query = text or replied_text or ""
+    return {"label": label, "query": query}
+
+
 def answer(
     query: str, k: int = config.TOP_K, *,
     history: list[dict] | None = None, user_city: str | None = None,

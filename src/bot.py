@@ -6,9 +6,10 @@ Requires BOT_TOKEN in .env (get it from @BotFather).
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import html
 import json
 import logging
+import re
 from datetime import date, datetime, timezone
 
 from aiogram import Bot, Dispatcher, F
@@ -17,14 +18,16 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    InlineQuery,
     InlineQueryResultArticle,
     InputTextMessageContent,
+    LabeledPrice,
+    LinkPreviewOptions,
     Message,
+    PreCheckoutQuery,
 )
 
 import config
-from src.rag import answer, to_telegram_html
+from src.rag import answer, classify_guest, to_telegram_html
 from src.store import transcribe_audio
 
 logging.basicConfig(level=logging.INFO)
@@ -37,20 +40,75 @@ dp = Dispatcher()
 # file never grows past one day of activity.
 _USAGE_PATH = config.DATA_DIR / "bot_usage.json"
 
+# Who has supported the bot (see /support, /grant below) — {user_id (str):
+# granted_at ISO timestamp}. A dict keyed by the grant date rather than a
+# plain set/list, even though nothing reads the date yet: whether supporter
+# status should EXPIRE (e.g. after 30 days) is still an open question, and
+# storing the date now means answering that later is just a new condition in
+# _is_supporter, not a data-file migration.
+_SUPPORTERS_PATH = config.DATA_DIR / "bot_supporters.json"
+
+
+def _load_supporters() -> dict[str, str]:
+    try:
+        return json.loads(_SUPPORTERS_PATH.read_text()) if _SUPPORTERS_PATH.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _is_supporter(user_id: int) -> bool:
+    return str(user_id) in _load_supporters()
+
+
+async def _grant_supporter(bot: Bot, user_id: int) -> None:
+    """The one place that actually makes a user_id a supporter — called from
+    BOTH payment paths (successful_payment for Stars, /grant for a manually
+    verified bank transfer) so they can never drift apart."""
+    supporters = _load_supporters()
+    supporters[str(user_id)] = datetime.now(timezone.utc).isoformat()
+    _SUPPORTERS_PATH.write_text(json.dumps(supporters, ensure_ascii=False))
+    try:
+        await bot.send_message(
+            user_id,
+            "Спасибо за поддержку! 🙏 Теперь доступны голосовые сообщения и "
+            f"лимит до {config.BOT_SUPPORTER_MAX_REQUESTS_PER_DAY} вопросов в день.",
+        )
+    except Exception:
+        # Best-effort — a failed notification shouldn't undo the grant itself
+        # (already written to disk above).
+        logging.exception("failed to notify %s about supporter status", user_id)
+
+
+def _limit_reached(user_id: int) -> bool:
+    """Read-only peek at the same cap _check_and_count enforces — for guest
+    mode, which has to know BEFORE spending a classifier call."""
+    if user_id in config.BOT_UNLIMITED_USER_IDS:
+        return False
+    limit = config.BOT_SUPPORTER_MAX_REQUESTS_PER_DAY if _is_supporter(user_id) else config.BOT_MAX_REQUESTS_PER_DAY
+    try:
+        usage = json.loads(_USAGE_PATH.read_text()) if _USAGE_PATH.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        usage = {}
+    return usage.get(f"{user_id}:{date.today().isoformat()}", 0) >= limit
+
 
 def _check_and_count(user_id: int) -> bool:
     """True = allowed (and counted); False = today's cap already hit.
-    config.BOT_UNLIMITED_USER_IDS bypasses the cap entirely (not even counted
-    here — their usage still shows up in the interaction log below)."""
+    Three tiers: config.BOT_UNLIMITED_USER_IDS bypasses the cap entirely (not
+    even counted here — their usage still shows up in the interaction log
+    below); a supporter (see _is_supporter) gets
+    config.BOT_SUPPORTER_MAX_REQUESTS_PER_DAY; everyone else gets
+    config.BOT_MAX_REQUESTS_PER_DAY."""
     if user_id in config.BOT_UNLIMITED_USER_IDS:
         return True
+    limit = config.BOT_SUPPORTER_MAX_REQUESTS_PER_DAY if _is_supporter(user_id) else config.BOT_MAX_REQUESTS_PER_DAY
     today = date.today().isoformat()
     try:
         usage = json.loads(_USAGE_PATH.read_text()) if _USAGE_PATH.exists() else {}
     except (json.JSONDecodeError, OSError):
         usage = {}
     key = f"{user_id}:{today}"
-    if usage.get(key, 0) >= config.BOT_MAX_REQUESTS_PER_DAY:
+    if usage.get(key, 0) >= limit:
         return False
     usage = {k: v for k, v in usage.items() if k.endswith(today)}  # drop old days
     usage[key] = usage.get(key, 0) + 1
@@ -68,7 +126,7 @@ _LOG_PATH = config.DATA_DIR / "bot_log.jsonl"
 
 def _log_interaction(
     user_id: int, username: str | None, question: str, answer_text: str,
-    history: list[dict],
+    history: list[dict], extra: dict | None = None,
 ) -> None:
     """history is the conversation BEFORE this question (same list passed
     into src.rag.answer) — attached as-is (no extra API calls, it's already
@@ -82,6 +140,7 @@ def _log_interaction(
         "history": history,
         "question": question,
         "answer": answer_text,
+        **(extra or {}),
     }
     with _LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -239,7 +298,9 @@ EXAMPLES = (
     "Задай вопрос, например:\n"
     "• Какие документы нужны для открытия ИП?\n"
     "• Как получить водительские права?\n"
-    "• Где найти мастера по ремонту в Тбилиси?"
+    "• Где найти мастера по ремонту в Тбилиси?\n\n"
+    f"Бесплатно: {config.BOT_MAX_REQUESTS_PER_DAY} вопросов в день. Голосовые "
+    "и больший лимит — для тех, кто поддержал бота, см. /support."
 )
 
 WELCOME = f"{GREETING}\n\n{EXAMPLES}"  # returning user, no city question involved
@@ -247,6 +308,12 @@ WELCOME = f"{GREETING}\n\n{EXAMPLES}"  # returning user, no city question involv
 
 @dp.message(CommandStart())
 async def on_start(message: Message) -> None:
+    if (message.text or "").split(maxsplit=1)[1:] == ["support"]:
+        # "Поддержать бота" button under a guest-mode limit notice — go
+        # straight to /support, and don't wipe the history of someone who
+        # may be mid-dialog in the DM already.
+        await on_support_command(message)
+        return
     _clear_history(message.chat.id)  # explicit fresh start clears any old context
     # A brand-new user: greeting + city question together first (greeting
     # someone before asking them something, not after) — the "here's how to
@@ -324,11 +391,110 @@ async def on_city_callback(callback: CallbackQuery) -> None:
         await callback.message.answer(EXAMPLES)  # greeting already sent alongside CITY_PROMPT
 
 
+@dp.message(Command("id"))
+async def on_id_command(message: Message) -> None:
+    # Plain, no formatting — meant to be copy-pasted along with a bank
+    # transfer receipt so Aleksandra knows which user_id to /grant.
+    await message.answer(str(message.from_user.id))
+
+
+_SUPPORT_TEXT = (
+    "Бот бесплатный для пользователей, но не бесплатный для меня — каждый "
+    "ответ и периодический пересбор знаний из чатов стоят денег в API. Всё, "
+    "что присылают сюда, идёт только на то, чтобы бот продолжал жить, не на "
+    "заработок.\n\n"
+    f"Бесплатно: {config.BOT_MAX_REQUESTS_PER_DAY} вопросов в день. "
+    f"Поддержавшим: голосовые + до {config.BOT_SUPPORTER_MAX_REQUESTS_PER_DAY} "
+    "вопросов в день.\n\n"
+    "Сумма символическая (от ~$1) — два способа на выбор:\n\n"
+    "⭐ <b>Звёздами Telegram</b> — кнопки ниже, зачисляется сразу автоматически.\n\n"
+    "🏦 <b>Переводом на счёт</b>:\n"
+    f"{config.SUPPORT_BANK_INFO}\n"
+    "После перевода:\n"
+    "1. Напиши мне лично (@elder_flower) чек об оплате.\n"
+    "2. Отправь боту команду /id — он ответит числом (твой id в Telegram).\n"
+    "3. Перешли это число тоже мне — по нему я отмечу тебя в боте вручную."
+)
+
+
+def _support_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"Поддержать — {n}⭐", callback_data=f"support:{n}")]
+            for n in config.STARS_SUPPORT_PRICES
+        ]
+    )
+
+
+@dp.message(Command("support"))
+async def on_support_command(message: Message) -> None:
+    # HTML so the IBAN in config.SUPPORT_BANK_INFO renders as monospace
+    # (<code>) — that's what makes it tap-to-copy in Telegram clients.
+    await message.answer(_SUPPORT_TEXT, reply_markup=_support_keyboard(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("support:"))
+async def on_support_callback(callback: CallbackQuery) -> None:
+    stars = int(callback.data.split(":", 1)[1])
+    await callback.answer()
+    await callback.bot.send_invoice(
+        chat_id=callback.from_user.id,
+        title="Поддержать бота",
+        description="Символическая поддержка — покрывает API и периодический пересбор знаний.",
+        payload="support",
+        currency="XTR",
+        prices=[LabeledPrice(label="Поддержка", amount=stars)],
+    )
+
+
+@dp.pre_checkout_query()
+async def on_pre_checkout_query(query: PreCheckoutQuery) -> None:
+    # Must be answered within 10s or Telegram cancels the payment — nothing
+    # to validate here (payload is always "support"), just confirm.
+    await query.answer(ok=True)
+
+
+@dp.message(F.successful_payment)
+async def on_successful_payment(message: Message) -> None:
+    await _grant_supporter(message.bot, message.from_user.id)
+
+
+@dp.message(Command("grant"))
+async def on_grant_command(message: Message) -> None:
+    # The manual side of /support — for a bank transfer Aleksandra verified
+    # herself. Only she can call this (same exemption set as the rate limit).
+    if message.from_user.id not in config.BOT_UNLIMITED_USER_IDS:
+        return
+    arg = (message.text or "").split(maxsplit=1)
+    target = arg[1].strip() if len(arg) > 1 else ""
+    if not target:
+        await message.answer("Использование: /grant <user_id или @username>")
+        return
+    if target.lstrip("@").isdigit():
+        user_id = int(target.lstrip("@"))
+    else:
+        # @username path — Bot API can resolve it directly, no need to make
+        # the payer run /id themselves. Not 100% reliable (depends on that
+        # person's privacy settings), so fall back to asking for /id instead
+        # of failing silently.
+        try:
+            chat = await message.bot.get_chat(target if target.startswith("@") else f"@{target}")
+            user_id = chat.id
+        except Exception:
+            await message.answer(
+                f"Не смогла найти {target} по юзернейму (могло не получиться из-за его "
+                "настроек приватности) — попроси прислать /id и вызови /grant с числом."
+            )
+            return
+    await _grant_supporter(message.bot, user_id)
+    await message.answer(f"Готово — {user_id} теперь supporter.")
+
+
 _LIMIT_REACHED_TEXT = (
     f"На сегодня бесплатные вопросы закончились (лимит {config.BOT_MAX_REQUESTS_PER_DAY}/день) "
     "— каждый ответ сжигает токены, а токены стоят денег 💀\n\n"
-    "Возвращайся завтра — лимит обновится. Или напиши @elder_flower, "
-    "если хочешь повысить лимит."
+    "Возвращайся завтра — лимит обновится. Или поддержи бота (/support) — "
+    f"получишь лимит {config.BOT_SUPPORTER_MAX_REQUESTS_PER_DAY}/день и голосовые."
 )
 
 
@@ -347,9 +513,18 @@ async def _answer_query(message: Message, query: str) -> None:
     await message.answer(to_telegram_html(text), parse_mode="HTML", disable_web_page_preview=True)
 
 
-@dp.message(F.voice)
+@dp.message(F.voice, F.chat.type == "private")
 async def on_voice(message: Message) -> None:
-    if not _check_and_count(message.from_user.id):
+    user_id = message.from_user.id
+    if not (_is_supporter(user_id) or user_id in config.BOT_UNLIMITED_USER_IDS):
+        # Gated before transcription — no point spending Groq quota on a
+        # voice message we're not going to answer anyway.
+        await message.answer(
+            "🎤 Голосовые — для тех, кто поддержал бота (см. /support). "
+            f"Текстом вопросы по-прежнему бесплатны ({config.BOT_MAX_REQUESTS_PER_DAY}/день)."
+        )
+        return
+    if not _check_and_count(user_id):
         await message.answer(_LIMIT_REACHED_TEXT)
         return
     await message.chat.do("typing")
@@ -374,74 +549,213 @@ async def on_voice(message: Message) -> None:
     await _answer_query(message, query)
 
 
-# Inline mode: typing "@georgia_insider_bot вопрос" in ANY chat (no need to
-# add the bot there) shows one result with the actual answer already in it.
-# See https://core.telegram.org/bots/inline.
+# Guest mode (https://core.telegram.org/bots/features#guest-bots): someone
+# mentions @georgia_insider_bot in ANY chat, or replies to one of its
+# messages there, and the bot gets a guest_message update and may answer
+# ONCE via answerGuestQuery — without being a member and without seeing the
+# chat's history. Replaced inline mode: inline inserts content the USER
+# sends, guest mode is the bot answering as itself, which is what a Q&A
+# assistant actually is.
 #
-# Originally tried the "insert a placeholder, fill it in later" pattern
-# (answer instantly, do the real RAG call in on_chosen_inline_result once the
-# user picks the result, then edit the message via inline_message_id) — the
-# standard approach for slow inline bots. Verified end-to-end that Telegram
-# never actually delivered chosen_inline_result to this bot at all (tested
-# directly at the MTProto level, bypassing any client-side quirk, with
-# /setinlinefeedback = Enabled on @BotFather) — a known reliability problem
-# with that update in practice, not something fixable on the bot's end.
+# Not every guest update deserves an answer — a reply to our answer is just
+# as likely "спасибо" or people arguing among themselves under it, and a
+# mention can be someone recommending the bot. classify_guest decides
+# (request / thanks / chatter / mention) and only a request gets an answer
+# and counts against the caller's daily limit. Answering isn't required.
 #
-# So instead: no placeholder, no edit. The RAG call happens directly in
-# on_inline_query, with a short debounce so a fast typer's earlier
-# keystrokes don't each trigger a full generation — only the LAST query for
-# a given user (the one no longer superseded after the debounce delay)
-# actually calls answer(). Costs slightly more than the placeholder pattern
-# would have (a debounce-survived call per pause in typing, not just per
-# final selection) but that pattern didn't work at all.
-_INLINE_DEBOUNCE_SECONDS = 1.2
-_inline_seq: dict[int, int] = {}  # user_id -> sequence number of its latest query
+# Flow for a request: placeholder first ("🔎 Ищу ответ…" — the guest query
+# deadline is undocumented and RAG can take a while), then edit it in place
+# via the inline_message_id answerGuestQuery returns. (Inline mode's version
+# of this pattern failed because chosen_inline_result never arrived; here the
+# id comes back synchronously from our own call.)
+_GUEST_PLACEHOLDER = "🔎 Ищу ответ…"
+_GUEST_HINT = (
+    "Я отвечаю на практические вопросы о жизни в Грузии по опыту людей из "
+    "чатов. Напиши вопрос после упоминания бота — или ответь упоминанием на "
+    "сообщение с вопросом."
+)
+_GUEST_FAILED = "Не получилось ответить — попробуй ещё раз чуть позже."
+# Telegram's limit is 4096 chars of text AFTER HTML parsing (and in UTF-16
+# units); comparing the raw HTML length against a lower cap is conservative
+# on both counts.
+_GUEST_MAX_HTML = 3900
+_NO_WORDS_RX = re.compile(r"^\W*$")  # emoji / punctuation only
 
 
-@dp.inline_query()
-async def on_inline_query(query: InlineQuery) -> None:
-    text = query.query.strip()
-    if not text:
-        await query.answer([], cache_time=1, is_personal=True)
-        return
-    user_id = query.from_user.id
-    seq = _inline_seq.get(user_id, 0) + 1
-    _inline_seq[user_id] = seq
+def _guest_keyboard(bot_username: str) -> InlineKeyboardMarkup:
+    # Funnel into the DM (history, /city, voice) — and an inline message with
+    # a keyboard is the safe bet for being editable later. Plain link, NOT a
+    # ?start= deep link: for someone who already uses the bot, clients send
+    # /start by themselves on a deep link, and on_start wipes their DM
+    # history mid-dialog and re-sends the welcome. A new user still gets
+    # Telegram's own Start button either way.
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="Спросить в боте", url=f"https://t.me/{bot_username}",
+    )]])
 
-    await asyncio.sleep(_INLINE_DEBOUNCE_SECONDS)
-    if _inline_seq.get(user_id) != seq:
-        return  # a newer keystroke for this user already superseded this query
 
-    if not _check_and_count(user_id):
-        result = InlineQueryResultArticle(
-            id="limit",
-            title="Лимит вопросов на сегодня исчерпан",
-            description=_LIMIT_REACHED_TEXT,
-            input_message_content=InputTextMessageContent(message_text=_LIMIT_REACHED_TEXT),
-        )
-        await query.answer([result], cache_time=0, is_personal=True)
-        return
-
-    result_data = await asyncio.to_thread(answer, text, user_city=_get_city(user_id))
-    # No conversation history: unlike a normal chat, an inline insertion has
-    # no stable "this chat" to persist a thread against (the same query text
-    # can land in a different chat every time) — each inline question is
-    # answered stateless, same as a first message with no history.
-    answer_text = result_data["answer"] or "Не удалось сформировать ответ."
-    _log_interaction(user_id, query.from_user.username, text, answer_text, [])
-    html_text = to_telegram_html(answer_text)
-    result = InlineQueryResultArticle(
-        id=hashlib.sha1(text.encode("utf-8")).hexdigest(),
-        title=f"Спросить: {text[:60]}",
-        description=answer_text[:120],
+def _guest_article(text: str, keyboard: InlineKeyboardMarkup, *, parse_mode: str | None = None) -> InlineQueryResultArticle:
+    return InlineQueryResultArticle(
+        id="0",
+        title="Ответ",
         input_message_content=InputTextMessageContent(
-            message_text=html_text, parse_mode="HTML", disable_web_page_preview=True,
+            message_text=text, parse_mode=parse_mode,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         ),
+        reply_markup=keyboard,
     )
-    await query.answer([result], cache_time=0, is_personal=True)
 
 
-@dp.message()
+def _is_own_message(message: Message, bot_id: int) -> bool:
+    # Which of these a guest-sent message carries isn't documented — check both.
+    return bool(
+        (message.from_user and message.from_user.id == bot_id)
+        or (message.via_bot and message.via_bot.id == bot_id)
+    )
+
+
+def _strip_mention(text: str, bot_username: str) -> str:
+    return re.sub(rf"@{re.escape(bot_username)}\b", "", text, flags=re.IGNORECASE).strip()
+
+
+async def _guest_voice_text(message: Message, caller_id: int) -> str:
+    """Transcript of message's voice — same supporter gate as the DM, but a
+    silent "" instead of a public nag in someone else's chat."""
+    if not message.voice or not (_is_supporter(caller_id) or caller_id in config.BOT_UNLIMITED_USER_IDS):
+        return ""
+    try:
+        buf = await message.bot.download(message.voice)
+        return (await asyncio.to_thread(transcribe_audio, buf.read())) or ""
+    except Exception:
+        logging.exception("guest voice transcription failed")
+        return ""
+
+
+def _guest_answer_html(question: str, answer_text: str) -> str:
+    """The question goes on top: the group sees what's being answered, and a
+    follow-up reply to this message hands classify_guest both the question
+    and the answer (the only "history" guest mode has)."""
+    header = f"❓ <i>{html.escape(question)}</i>\n\n"
+    body = to_telegram_html(answer_text)
+    while len(header) + len(body) > _GUEST_MAX_HTML and len(answer_text) > 200:
+        answer_text = answer_text[: int(len(answer_text) * 0.8)].rsplit("\n", 1)[0]
+        body = to_telegram_html(answer_text) + "\n\n…продолжение — спроси в боте"
+    return header + body
+
+
+def _guest_limit_keyboard(bot_username: str) -> InlineKeyboardMarkup:
+    # Deep link on purpose here (unlike _guest_keyboard): on_start routes
+    # "support" straight to the /support screen without touching history.
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="Поддержать бота", url=f"https://t.me/{bot_username}?start=support",
+    )]])
+
+
+def _guest_limit_html(message: Message) -> str:
+    """Public, in someone else's chat — so it names WHOSE limit ran out (not
+    the chat's, not the bot's) and stays friendly: no token-cost lecture, no
+    /commands that don't work there."""
+    if message.sender_chat:
+        who = html.escape(message.sender_chat.title or "этот чат")
+    else:
+        u = message.from_user
+        who = f"@{u.username}" if u.username else f'<a href="tg://user?id={u.id}">{html.escape(u.first_name)}</a>'
+    if message.from_user and _is_supporter(message.from_user.id):
+        return f"{who}, на сегодня твои вопросы закончились — завтра лимит обновится 🙌"
+    return (
+        f"{who}, на сегодня твои бесплатные вопросы закончились — завтра лимит "
+        "обновится 🙌\n\n"
+        "Если бот тебе пригодился, его можно поддержать: так он продолжит "
+        f"жить, а у тебя будет до {config.BOT_SUPPORTER_MAX_REQUESTS_PER_DAY} "
+        "вопросов в день и голосовые."
+    )
+
+
+@dp.guest_message()
+async def on_guest_message(message: Message) -> None:
+    # Raw dump while guest-mode behavior is still being verified live (what
+    # a reply to our own guest message looks like, etc.) — remove after.
+    logging.info("guest_message: %s", message.model_dump_json(exclude_none=True))
+    bot = message.bot
+    me = await bot.me()
+    if message.sender_chat is None and message.from_user and message.from_user.is_bot:
+        return  # another bot — no bot-to-bot ping-pong on our API bill
+    # Anonymous admin / posting as a channel: from_user is GroupAnonymousBot,
+    # the real identity is sender_chat.
+    caller_id = message.sender_chat.id if message.sender_chat else message.from_user.id
+    caller_username = message.from_user.username if message.from_user else None
+    if _limit_reached(caller_id):
+        # Before anything that costs money (transcription, classifier) — and
+        # answered whatever the message was, even a "спасибо".
+        await bot.answer_guest_query(
+            guest_query_id=message.guest_query_id,
+            result=_guest_article(_guest_limit_html(message), _guest_limit_keyboard(me.username), parse_mode="HTML"),
+        )
+        return
+
+    reply = message.reply_to_message
+    replied_is_bot = reply is not None and _is_own_message(reply, me.id)
+    text = _strip_mention(message.text or message.caption or "", me.username)
+    if not text:
+        text = await _guest_voice_text(message, caller_id)
+    if _NO_WORDS_RX.match(text):
+        text = ""  # 👍 / "!!!" — nothing to act on by itself
+    replied_text = ""
+    if reply is not None:
+        replied_text = reply.text or reply.caption or ""
+        if not replied_text and not replied_is_bot:
+            replied_text = await _guest_voice_text(reply, caller_id)
+
+    if not text and not replied_text:
+        if reply is None:
+            # Bare "@bot": they clearly want the bot, just didn't say what.
+            await bot.answer_guest_query(
+                guest_query_id=message.guest_query_id,
+                result=_guest_article(_GUEST_HINT, _guest_keyboard(me.username)),
+            )
+        return  # sticker / emoji / unsupported voice reply — stay quiet
+    if replied_is_bot and not text:
+        return  # emoji-only / sticker reply to our own answer
+
+    verdict = await asyncio.to_thread(classify_guest, text, replied_text or None, replied_is_bot)
+    extra = {"source": "guest", "chat_type": message.chat.type, "label": verdict["label"], "raw_text": text}
+    if verdict["label"] != "request":
+        _log_interaction(caller_id, caller_username, text, "", [], extra)
+        return
+
+    query = verdict["query"]
+    keyboard = _guest_keyboard(me.username)
+    if not _check_and_count(caller_id):  # hit the cap in a parallel request since the peek
+        await bot.answer_guest_query(
+            guest_query_id=message.guest_query_id,
+            result=_guest_article(_guest_limit_html(message), _guest_limit_keyboard(me.username), parse_mode="HTML"),
+        )
+        return
+
+    sent = await bot.answer_guest_query(
+        guest_query_id=message.guest_query_id, result=_guest_article(_GUEST_PLACEHOLDER, keyboard),
+    )
+    try:
+        result = await asyncio.to_thread(answer, query, user_city=_get_city(caller_id))
+        answer_text = result["answer"] or "Не удалось сформировать ответ."
+        final_html = _guest_answer_html(query, answer_text)
+    except Exception:
+        logging.exception("guest answer failed")
+        answer_text, final_html = "", _GUEST_FAILED
+    _log_interaction(caller_id, caller_username, query, answer_text, [], extra)
+    try:
+        await bot.edit_message_text(
+            text=final_html, inline_message_id=sent.inline_message_id, parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True), reply_markup=keyboard,
+        )
+    except Exception:
+        logging.exception("failed to edit guest placeholder %s", sent.inline_message_id)
+
+
+# Private only: groups are guest mode's job (joining groups is disabled in
+# BotFather, but a bot added earlier would still get mentions/replies here as
+# plain messages — mention not stripped, one history shared by the group).
+@dp.message(F.chat.type == "private")
 async def on_question(message: Message) -> None:
     query = (message.text or "").strip()
     if not query:

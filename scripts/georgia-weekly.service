@@ -13,5 +13,8 @@ Group=deploy
 WorkingDirectory=/opt/telegram-georgia-rag
 ExecStart=/usr/local/bin/uv run python -u -m src.weekly_pipeline
 ExecStartPost=/usr/bin/sudo /usr/bin/systemctl restart georgia-bot
-StandardOutput=append:/opt/telegram-georgia-rag/data/logs/weekly_update.log
-StandardError=append:/opt/telegram-georgia-rag/data/logs/weekly_update.log
+# Points at the EXTERNAL data dir (GEORGIA_DATA_DIR in .env), not the code
+# checkout — systemd's own redirect here bypasses config.py entirely, so it
+# has to be kept in sync with GEORGIA_DATA_DIR by hand if that ever moves again.
+StandardOutput=append:/opt/telegram-georgia-data/data/logs/weekly_update.log
+StandardError=append:/opt/telegram-georgia-data/data/logs/weekly_update.log

@@ -10,7 +10,7 @@ guessing.
 > The bot answers in Russian — the source chats and target users are
 > Russian-speaking.
 
-**Bot:** _(ссылка появится здесь, когда определимся с именем — @TODO)_
+**Bot:** [@georgia_insider_bot](https://t.me/georgia_insider_bot)
 
 ## How it works
 
@@ -54,11 +54,14 @@ User message → rag (retrieve + generate + cite) → bot (Telegram) → answer
 - **`src/rag.py`** — build the answer: retrieve, generate with inline
   citations, resolve short follow-ups against conversation history
   (`_rewrite_query`), render Telegram HTML with real source links.
-- **`src/bot.py`** — the Telegram interface (aiogram): text questions, voice
-  messages (transcribed via Groq's hosted Whisper, free tier), inline mode
-  (`@bot вопрос` in any chat, no need to add the bot there), per-user daily
-  rate limit, and a JSONL interaction log for analytics/future eval-set
-  growth.
+- **`src/bot.py`** — the Telegram interface (aiogram): text questions in
+  private chat, voice messages (transcribed via Groq's hosted Whisper, free
+  tier, supporters only), guest mode (`@bot вопрос` — mention or reply in ANY
+  chat, no need to add the bot there — classified via `classify_guest` in
+  `src/rag.py` so "спасибо"/chatter doesn't trigger a full answer), a
+  per-user daily rate limit (5/day free, 100/day for supporters — see
+  `/support`, `/grant`), and a JSONL interaction log for analytics/future
+  eval-set growth.
 - **`src/eval_retrieval.py`** / **`src/eval_rag.py`** — a from-scratch
   evaluation harness (not ragas) against `eval/golden_queries.jsonl`: sweeps
   `(k, threshold)` for retrieval, judges faithfulness/relevance/hallucination
@@ -117,11 +120,11 @@ Collection runs directly on the production server (not a local machine) —
 now, so nothing depends on any laptop being on. `scripts/georgia-weekly.service`
 + `scripts/georgia-weekly.timer` (deployed to `/etc/systemd/system/`) run
 `src.weekly_pipeline` every Monday 04:00 (+ up to 5min random delay) and
-restart the bot service afterward. Logs: `data/logs/weekly_update.log` on
-the server. Check it any time with:
+restart the bot service afterward. Logs: `data/logs/weekly_update.log`
+under the external data dir (see Deployment below). Check it any time with:
 
 ```bash
-ssh deploy@<server> "systemctl list-timers georgia-weekly.timer; tail -30 /opt/telegram-georgia-rag/data/logs/weekly_update.log"
+ssh deploy@<server> "systemctl list-timers georgia-weekly.timer; tail -30 /opt/telegram-georgia-data/data/logs/weekly_update.log"
 ```
 
 Because both `update_knowledge` and `index` are incremental, a normal weekly
@@ -161,18 +164,33 @@ server's baseline hardening matters: SSH is key-only, no root login, `ufw`
 allows only SSH in, `fail2ban` bans repeat auth failures and pings Telegram
 on every ban (see `scripts/notify_ban.sh`), and the bot service crashing
 also pings Telegram (`scripts/notify_on_failure.sh`, wired via
-`ExecStopPost=`). Code redeploy (collection data isn't touched by this):
+`ExecStopPost=`).
+
+On the server, `data/` and `chroma_db/` live OUTSIDE the code checkout
+entirely — at `/opt/telegram-georgia-data/{data,chroma_db}`, pointed to via
+`GEORGIA_DATA_DIR`/`GEORGIA_CHROMA_DIR` in `.env` (`config.py` falls back to
+the usual repo-relative paths when those aren't set, which is what local dev
+uses). This is deliberate, not incidental: a code redeploy only ever touches
+`/opt/telegram-georgia-rag/`, so it is now structurally unable to reach the
+live vector index or collected knowledge, regardless of what `--exclude`
+flags a given rsync command does or doesn't have. This came from a real
+incident — a deploy without `--exclude='chroma_db'` once silently overwrote
+the server's live vector index with a stale local copy (recovered by
+re-running `uv run python -m src.index`, which is diff-based and safe to
+re-run any time) — the exclude flags below are kept anyway as a second guard,
+but the directory split is the actual fix.
 
 ```bash
 rsync -az --exclude='.venv' --exclude='__pycache__' --exclude='.git' \
-  --exclude='data' --exclude='notebooks' --exclude='eval' \
+  --exclude='data' --exclude='chroma_db' --exclude='notebooks' --exclude='eval' \
   --exclude='*.session*' --exclude='.env' \
   ./ deploy@<server>:/opt/telegram-georgia-rag/
 ssh deploy@<server> "sudo systemctl restart georgia-bot"
 ```
 
-(`deploy` has a narrowly-scoped passwordless sudo rule — only
-`systemctl {restart,status,is-active} georgia-bot`, nothing else.)
+(`deploy` has full passwordless sudo — broader than originally scoped; the
+Contabo web console became the only path back in once a lockout happened
+with no fallback, so it was widened rather than risk repeating that.)
 
 ## ⚠️ Privacy
 

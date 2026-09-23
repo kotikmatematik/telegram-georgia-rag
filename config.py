@@ -11,10 +11,19 @@ load_dotenv()
 
 # --- Paths ---
 ROOT = Path(__file__).parent
-DATA_DIR = ROOT / "data"
+# DATA_DIR/CHROMA_DIR are env-overridable (GEORGIA_DATA_DIR/GEORGIA_CHROMA_DIR)
+# so they can live OUTSIDE the repo checkout on a server — a code deploy
+# there (rsync of the repo tree) then physically cannot reach them, no
+# matter what --exclude flags a given rsync command does or doesn't have.
+# This is not hypothetical: a deploy without --exclude='chroma_db' once
+# silently overwrote the server's live vector index with a stale local
+# copy (see README's Deployment section). Local dev default (unset env
+# vars) is unchanged — still repo-relative, so nothing changes for anyone
+# not opting into the env vars.
+DATA_DIR = Path(os.getenv("GEORGIA_DATA_DIR") or ROOT / "data")
 RAW_DIR = DATA_DIR / "raw"              # raw messages: data/raw/<chat>.jsonl
 KNOWLEDGE_DIR = DATA_DIR / "knowledge"  # distilled Q&A: data/knowledge/<chat>.jsonl
-CHROMA_DIR = ROOT / "chroma_db"         # persistent vector DB
+CHROMA_DIR = Path(os.getenv("GEORGIA_CHROMA_DIR") or ROOT / "chroma_db")  # persistent vector DB
 # eval/ (repo root, tracked in git) holds the hand-curated golden query set —
 # data/ is entirely gitignored (real chat content), so it can't live there.
 # data/eval/ (gitignored, created below) holds run OUTPUTS (judged .jsonl
@@ -81,6 +90,13 @@ TRANSCRIBE_MODEL = "whisper-large-v3-turbo"
 # Revert: GENERATION_MODEL = CHAT_MODEL, GENERATION_REASONING_EFFORT = None.
 GENERATION_MODEL = "gpt-5.6-luna"
 GENERATION_REASONING_EFFORT = "low"
+
+# Guest mode gate (src/rag.py classify_guest): request vs thanks/chatter/
+# passing mention, plus the standalone query. Runs BEFORE the "🔎 Ищу ответ…"
+# placeholder is sent (a placeholder can't be taken back for a "спасибо"),
+# so it sits inside Telegram's unknown guest-query deadline — keep it fast.
+GUEST_CLASSIFY_MODEL = "gpt-5.6-luna"
+GUEST_CLASSIFY_REASONING_EFFORT = "low"
 
 # --- Distillation stage 1 (src/knowledge.py), split into two sequential calls ---
 # 1a splits the raw thread into semantic branches (message ids only, so the
@@ -199,8 +215,33 @@ EMBED_BATCH = 100            # batch size for embedding requests
 
 # --- Bot abuse guard (src/bot.py) ---
 # ~$0.0007/query measured live (config.GENERATION_MODEL, TOP_K=6 context).
-BOT_MAX_REQUESTS_PER_DAY = 10
-BOT_UNLIMITED_USER_IDS = {273465125}  # Aleksandra (@elder_flower) — exempt from the daily cap
+# Free tier: most people only ever need 1-2 questions, so 5/day is already
+# generous — kept low (was 10) once the bot left the trusted friend circle,
+# since the real ongoing cost isn't just per-question but also the periodic
+# knowledge re-collection (src.weekly_pipeline, ~$0.30-1.30/week regardless
+# of how many people ask). Supporters (see BOT_SUPPORTER_MAX_REQUESTS_PER_DAY
+# below) get a much higher — but still bounded, not unlimited — ceiling.
+BOT_MAX_REQUESTS_PER_DAY = 5
+BOT_SUPPORTER_MAX_REQUESTS_PER_DAY = 100
+BOT_UNLIMITED_USER_IDS = {273465125}  # Aleksandra (@elder_flower) — exempt from every cap
+
+# --- Bot monetization (src/bot.py /support, /grant) ---
+# Purely to keep the bot's own API bill covered, not for profit — see
+# /support's own text. Two payment paths, both land on the same
+# _grant_supporter(): Telegram Stars (automatic, via successful_payment) for
+# anyone comfortable with it, or a plain bank transfer + manual /grant for
+# anyone who isn't (Aleksandra herself included). Amounts are deliberately
+# small/symbolic (~$1 minimum) — the goal is covering costs and a gesture of
+# reciprocity, not a real paywall.
+STARS_SUPPORT_PRICES = [50, 100, 200]  # ~$1 / $2 / $4 — verify actual Stars->$ rate before launch
+# IBAN and recipient name both wrapped in <code> — /support sends this with
+# parse_mode="HTML", and monospace is what makes Telegram clients let you
+# tap-to-copy it.
+SUPPORT_BANK_INFO = (
+    "Bank of Georgia, получатель <code>REDACTED_NAME</code>\n"
+    "IBAN: <code>GE00XXXXXXXXXXXXXXXXXX</code>\n"
+    "От 3₾ / ~$1."
+)
 
 # --- Retrieval + RAG evaluation (src/eval_retrieval.py, src/eval_rag.py) ---
 # Wider than TOP_K on purpose: eval_retrieval fetches this many candidates

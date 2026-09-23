@@ -38,14 +38,24 @@ def openai_client() -> OpenAI:
                         )
                     # Azure's v1-compatible surface: plain OpenAI client, just a
                     # different base_url — no AzureOpenAI class / api_version needed.
+                    # timeout: observed directly during the 2024 backfill — a
+                    # handful of in-flight requests just hung forever (TCP
+                    # connection ESTABLISHED, zero CPU/data movement, no
+                    # exception ever raised) while fresh calls to the same
+                    # endpoint succeeded in ~2s. Without a client-side timeout
+                    # that silently blocks distill_threads's whole worker pool
+                    # (as_completed never sees that future finish) — a bounded
+                    # timeout turns it into an ordinary exception, caught by
+                    # _distill_thread_safe like any other per-thread failure.
                     _openai = OpenAI(
                         api_key=config.AZURE_OPENAI_API_KEY,
                         base_url=config.AZURE_OPENAI_ENDPOINT,
+                        timeout=120,
                     )
                 else:
                     if not config.OPENAI_API_KEY:
                         raise SystemExit("OPENAI_API_KEY is not set in .env")
-                    _openai = OpenAI(api_key=config.OPENAI_API_KEY)
+                    _openai = OpenAI(api_key=config.OPENAI_API_KEY, timeout=120)
     return _openai
 
 
