@@ -60,10 +60,13 @@ def _is_supporter(user_id: int) -> bool:
     return str(user_id) in _load_supporters()
 
 
-async def _grant_supporter(bot: Bot, user_id: int) -> None:
+async def _grant_supporter(bot: Bot, user_id: int, *, source: str = "") -> None:
     """The one place that actually makes a user_id a supporter — called from
     BOTH payment paths (successful_payment for Stars, /grant for a manually
-    verified bank transfer) so they can never drift apart."""
+    verified bank transfer) so they can never drift apart. `source` is a
+    short human-readable note for the owner notification below (e.g. "50⭐
+    через Stars", "вручную через /grant") — purely cosmetic, doesn't affect
+    the grant itself."""
     supporters = _load_supporters()
     supporters[str(user_id)] = datetime.now(timezone.utc).isoformat()
     _SUPPORTERS_PATH.write_text(json.dumps(supporters, ensure_ascii=False))
@@ -77,6 +80,16 @@ async def _grant_supporter(bot: Bot, user_id: int) -> None:
         # Best-effort — a failed notification shouldn't undo the grant itself
         # (already written to disk above).
         logging.exception("failed to notify %s about supporter status", user_id)
+    # Owner notification — the Stars path is otherwise silent to her (only
+    # the payer gets told); the bank-transfer path she already knows about
+    # (she's the one running /grant), but notifying both paths the same way
+    # keeps this one place the single source of truth for "who paid, when".
+    note = f" ({source})" if source else ""
+    for owner_id in config.BOT_UNLIMITED_USER_IDS:
+        try:
+            await bot.send_message(owner_id, f"💰 Новый supporter: {user_id}{note}")
+        except Exception:
+            logging.exception("failed to notify owner %s about new supporter %s", owner_id, user_id)
 
 
 def _limit_reached(user_id: int) -> bool:
@@ -423,7 +436,8 @@ async def on_pre_checkout_query(query: PreCheckoutQuery) -> None:
 
 @dp.message(F.successful_payment)
 async def on_successful_payment(message: Message) -> None:
-    await _grant_supporter(message.bot, message.from_user.id)
+    stars = message.successful_payment.total_amount
+    await _grant_supporter(message.bot, message.from_user.id, source=f"{stars}⭐ через Stars")
 
 
 @dp.message(Command("grant"))
@@ -453,7 +467,7 @@ async def on_grant_command(message: Message) -> None:
                 "настроек приватности) — попроси прислать /id и вызови /grant с числом."
             )
             return
-    await _grant_supporter(message.bot, user_id)
+    await _grant_supporter(message.bot, user_id, source="вручную через /grant")
     await message.answer(f"Готово — {user_id} теперь supporter.")
 
 

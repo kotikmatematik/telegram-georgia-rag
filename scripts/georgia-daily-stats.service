@@ -1,0 +1,21 @@
+# Deployed to /etc/systemd/system/georgia-daily-stats.service on the server.
+# Sends a daily usage digest (questions today, unique users, new supporters)
+# to config.BOT_UNLIMITED_USER_IDS via Telegram. Triggered by
+# georgia-daily-stats.timer. Runs standalone — doesn't touch the live bot
+# process, just reads data/bot_log.jsonl and data/bot_supporters.json.
+[Unit]
+Description=Georgia RAG daily usage digest
+
+[Service]
+Type=oneshot
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/telegram-georgia-rag
+# import config resolves relative to CWD's sys.path[0], which a plain
+# `python scripts/daily_stats.py` invocation does NOT put the repo root on
+# (sys.path[0] becomes scripts/ instead) — PYTHONPATH fixes that without
+# needing scripts/ to be a proper package.
+Environment=PYTHONPATH=/opt/telegram-georgia-rag
+ExecStart=/usr/local/bin/uv run python scripts/daily_stats.py
+StandardOutput=append:/opt/telegram-georgia-data/data/logs/daily_stats.log
+StandardError=append:/opt/telegram-georgia-data/data/logs/daily_stats.log
