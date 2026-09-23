@@ -234,12 +234,16 @@ BOT_UNLIMITED_USER_IDS = {273465125}  # Aleksandra (@elder_flower) — exempt fr
 # small/symbolic (~$1 minimum) — the goal is covering costs and a gesture of
 # reciprocity, not a real paywall.
 STARS_SUPPORT_PRICES = [50, 100, 200]  # ~$1 / $2 / $4 — verify actual Stars->$ rate before launch
-# IBAN and recipient name both wrapped in <code> — /support sends this with
-# parse_mode="HTML", and monospace is what makes Telegram clients let you
-# tap-to-copy it.
+# Real bank name/IBAN/recipient live in .env — not here, this file is
+# tracked in git. IBAN and name both wrapped in <code> — /support sends this
+# with parse_mode="HTML", and monospace is what makes Telegram clients let
+# you tap-to-copy it.
+SUPPORT_BANK_NAME = os.getenv("SUPPORT_BANK_NAME", "<bank name — set in .env>")
+SUPPORT_BANK_IBAN = os.getenv("SUPPORT_BANK_IBAN", "<IBAN — set in .env>")
+SUPPORT_BANK_RECIPIENT = os.getenv("SUPPORT_BANK_RECIPIENT", "<recipient name — set in .env>")
 SUPPORT_BANK_INFO = (
-    "Bank of Georgia, получатель <code>REDACTED_NAME</code>\n"
-    "IBAN: <code>GE00XXXXXXXXXXXXXXXXXX</code>\n"
+    f"{SUPPORT_BANK_NAME}, получатель <code>{SUPPORT_BANK_RECIPIENT}</code>\n"
+    f"IBAN: <code>{SUPPORT_BANK_IBAN}</code>\n"
     "От 3₾ / ~$1."
 )
 
