@@ -208,9 +208,13 @@ def _inline_citations(text: str, hits: list[dict]) -> tuple[str, list[dict]]:
 
     def repl(m: re.Match) -> str:
         parts = []
+        seen_in_run: set[int] = set()  # model sometimes repeats a number in
+        # one run, e.g. "[3][3]" — same fragment would otherwise render as
+        # two identical "(date)" citations back to back.
         for n in _CITE_NUM_RX.findall(m.group(0)):
             i = int(n)
-            if 1 <= i <= len(hits):
+            if 1 <= i <= len(hits) and i not in seen_in_run:
+                seen_in_run.add(i)
                 used_indices.add(i)
                 m_ = hits[i - 1]["meta"]
                 lock = "🔒" if _is_private(m_["chat_username"]) else ""
