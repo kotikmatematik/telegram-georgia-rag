@@ -59,30 +59,11 @@ def _is_non_answer(answer: str) -> bool:
     return bool(_NON_ANSWER_RX.search(answer))
 
 
-# Mask personal contacts (phone numbers, @handles) with a placeholder token —
-# not deleted (leaves grammatically broken remnants) and not a made-up claim
-# like "контакт есть в источнике" (breaks faithfulness: the judge flags it as
-# unconfirmed, since the thread never says that). A public chat/channel link
-# is left alone — not a personal contact. Called only from
-# src.fix_knowledge.save_fixed, AFTER judging/fixing — the judge must always
-# see the real, unmasked text.
-_PHONE_RX = re.compile(r"\+?\(?\d[\d\-\s\(\)]{5,}\d")
-_TG_HANDLE_RX = re.compile(r"@\w{4,}")
-_HANDLE_PLACEHOLDER = "@username"
-
-
-def _mask_contacts(answer: str) -> str:
-    def _phone_repl(m: re.Match) -> str:
-        digits = re.sub(r"\D", "", m.group(0))
-        # >=9 digits: matches Georgian/Russian mobile numbers, not dates
-        # (e.g. "2025-03-01" is only 8 digits) or short incidental numbers.
-        # X's match the real digit count, so it still reads as "a phone
-        # number was here" rather than a fixed, meaningless-length token.
-        return "X" * len(digits) if len(digits) >= 9 else m.group(0)
-
-    answer = _PHONE_RX.sub(_phone_repl, answer)
-    answer = _TG_HANDLE_RX.sub(_HANDLE_PLACEHOLDER, answer)
-    return answer
+# Contact masking used to happen here (baked into stored knowledge at
+# collection time) — moved to src.rag._build_context, applied live per-
+# fragment at retrieval time instead, based on config.CHATS' private flag.
+# .fixed.jsonl now always stores the full, real, unmasked text for every
+# chat — see src.fix_knowledge.save_fixed's docstring for why.
 
 # Russian on purpose: source chats and the target assistant are Russian-speaking.
 SYSTEM_PROMPT = (

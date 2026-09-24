@@ -32,7 +32,7 @@ import json
 
 import config
 from src.eval_knowledge import _run_parallel
-from src.knowledge import _mask_contacts, _thread_text
+from src.knowledge import _thread_text
 from src.store import chat_json
 
 ATOMIZE_SYSTEM = (
@@ -178,12 +178,11 @@ def drop_thread_duplicates(units: list[dict]) -> list[dict]:
 def save_fixed(username: str, result: dict[str, list[dict]]) -> None:
     """Write the final, corrected knowledge (kept + fixed from fix_batch's
     result) to data/knowledge/<username>.fixed.jsonl — this is the file that
-    feeds indexing (src/index.py) downstream. Masks contacts here, after
-    judging/fixing (see src.knowledge._mask_contacts for why here specifically).
-    """
+    feeds indexing (src/index.py) downstream. Always the full, real text —
+    contact masking is no longer baked in here (moved to src.rag._build_context,
+    applied live per-fragment based on config.CHATS' private flag, so the
+    masking policy can change without ever touching this file or re-indexing)."""
     final_knowledge = drop_thread_duplicates(result["kept"] + result["fixed"])
-    for u in final_knowledge:
-        u["answer"] = _mask_contacts(u["answer"])
 
     out_path = config.KNOWLEDGE_DIR / f"{username}.fixed.jsonl"
     with out_path.open("w", encoding="utf-8") as f:

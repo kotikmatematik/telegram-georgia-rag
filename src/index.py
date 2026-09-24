@@ -72,11 +72,21 @@ def main() -> None:
     desired_hash = {i: _content_hash(u) for i, u in desired.items()}
 
     collection = get_collection()
-    existing = collection.get(include=["metadatas"])
-    existing_hash = {
-        i: (m or {}).get("content_hash")
-        for i, m in zip(existing["ids"], existing["metadatas"])
-    }
+    # Paginated, not a single unbounded get() — chromadb's sqlite backend
+    # hits "too many SQL variables" once the collection is large enough
+    # (first seen at 53768 records) if asked for everything at once.
+    existing_hash: dict[str, str] = {}
+    offset = 0
+    page_size = 5000
+    while True:
+        page = collection.get(include=["metadatas"], limit=page_size, offset=offset)
+        if not page["ids"]:
+            break
+        existing_hash.update({
+            i: (m or {}).get("content_hash")
+            for i, m in zip(page["ids"], page["metadatas"])
+        })
+        offset += page_size
 
     to_delete = [i for i in existing_hash if i not in desired_hash]
     to_upsert = [i for i, h in desired_hash.items() if existing_hash.get(i) != h]

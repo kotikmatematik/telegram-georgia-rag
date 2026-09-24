@@ -152,6 +152,17 @@ LLM_SEED = 0
 # --- Vector DB ---
 COLLECTION_NAME = "georgia_chats"
 
+# --- Contact masking (src/rag.py's _build_context) ---
+# Applied live, per-fragment, at retrieval time — NOT baked into
+# data/knowledge/*.fixed.jsonl (which always stores the full unmasked text,
+# for every chat, private or public). Only fragments from a chat marked
+# "private": True in CHATS below ever get masked. Two independent toggles
+# so either can be flipped later (e.g. "hide phones, keep usernames")
+# without touching the knowledge base or re-indexing anything — the whole
+# point of doing this at retrieval time instead of at collection time.
+MASK_PHONE_IN_PRIVATE_CHATS = True
+MASK_USERNAME_IN_PRIVATE_CHATS = True
+
 # --- Ingest ---
 # Cutoff by DATE, not by count: a fixed message count pulls ~2 years of a quiet
 # chat but only ~3 months of a busy one. INGEST_SINCE is the oldest message we

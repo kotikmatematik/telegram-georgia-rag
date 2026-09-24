@@ -235,13 +235,38 @@ def _inline_citations(text: str, hits: list[dict]) -> tuple[str, list[dict]]:
     return text, sources
 
 
-# Detects src.knowledge._mask_contacts's placeholders (baked into stored
-# knowledge at collection time, not something rag.py itself masks) — a bare
-# "@username" or a run of X's standing in for a real phone number reads as
-# broken/suspicious if the reader doesn't know it's deliberate privacy
-# masking, not a redaction of something wrong. One short footnote, only when
-# an answer actually contains one — same "annotate only when it fires"
-# pattern as _GK_MARKER above.
+# Contact masking — applied HERE, live, per-fragment, in _build_context
+# below (config.MASK_PHONE_IN_PRIVATE_CHATS/MASK_USERNAME_IN_PRIVATE_CHATS),
+# never baked into data/knowledge/*.fixed.jsonl itself. That file always
+# stores the full, real text for every chat, private or public — so
+# changing the masking policy later (mask usernames but not phones, or vice
+# versa; add/remove a chat from the private list) is a config edit only,
+# never a re-collection or re-index. Only a fragment from a chat marked
+# "private": True in config.CHATS (see _is_private) is ever masked; public
+# chats' contacts pass through untouched.
+_PHONE_RX = re.compile(r"\+?\(?\d[\d\-\s\(\)]{5,}\d")
+_TG_HANDLE_RX = re.compile(r"@\w{4,}")
+_HANDLE_PLACEHOLDER = "@username"
+
+
+def _mask_contacts(text: str) -> str:
+    if config.MASK_PHONE_IN_PRIVATE_CHATS:
+        def _phone_repl(m: re.Match) -> str:
+            digits = re.sub(r"\D", "", m.group(0))
+            # >=9 digits: matches Georgian/Russian mobile numbers, not dates
+            # or short incidental numbers.
+            return "X" * len(digits) if len(digits) >= 9 else m.group(0)
+        text = _PHONE_RX.sub(_phone_repl, text)
+    if config.MASK_USERNAME_IN_PRIVATE_CHATS:
+        text = _TG_HANDLE_RX.sub(_HANDLE_PLACEHOLDER, text)
+    return text
+
+
+# A bare "@username" or a run of X's standing in for a real phone number
+# reads as broken/suspicious if the reader doesn't know it's deliberate
+# privacy masking, not a redaction of something wrong. One short footnote,
+# only when an answer actually contains one — same "annotate only when it
+# fires" pattern as _GK_MARKER above.
 _MASKED_CONTACT_RX = re.compile(r"@username\b|X{9,}")
 _MASKED_CONTACT_NOTE = (
     "\n\n🙈 Контакты (телефон/юзернейм) иногда скрыты — так безопаснее "
@@ -335,10 +360,14 @@ def _build_context(hits: list[dict]) -> str:
     for i, h in enumerate(hits, 1):
         m = h["meta"]
         city = f", город: {m['city']}" if m.get("city") else ""
+        # Mask ONLY if this fragment's own source chat is private — the
+        # knowledge store itself is never masked (see _mask_contacts above),
+        # so a public-chat fragment's real contacts pass straight through.
+        answer = _mask_contacts(m["answer"]) if _is_private(m["chat_username"]) else m["answer"]
         blocks.append(
             f"[Фрагмент {i}] тип: {m['type']}{city}, дата: {m.get('date', '')}\n"
             f"ссылка: {m['link']}\n"
-            f"Вопрос: {m['question']}\nОтвет: {m['answer']}"
+            f"Вопрос: {m['question']}\nОтвет: {answer}"
         )
     return "\n\n".join(blocks)
 
