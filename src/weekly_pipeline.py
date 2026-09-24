@@ -13,6 +13,14 @@ content that actually changed — so a normal weekly run costs roughly what
 was measured for incremental re-collection (~$0.30-1.30/week across all
 chats), not a full from-scratch redo.
 
+Between update_knowledge and index, scripts.dedupe_knowledge runs — thread
+building occasionally produces two overlapping threads for the same
+underlying reply, each distilling it into a near-duplicate knowledge unit
+(same source link, same/reworded question); left alone these both get
+embedded and retrieval surfaces the same fact twice. dedupe_knowledge drops
+exact duplicates and LLM-merges partial ones (same question, answers that
+each hold a detail the other lacks) before indexing.
+
 One chat failing (e.g. a transient Azure error) is logged and skipped, not
 allowed to abort the whole run — the same per-thread/per-chat isolation
 already used elsewhere in the pipeline.
@@ -26,6 +34,7 @@ import sys
 import time
 
 import config
+from scripts.dedupe_knowledge import run as dedupe_knowledge
 from src.update_knowledge import update_knowledge
 
 
@@ -47,6 +56,12 @@ def main() -> None:
                 "skipping, other chats continue",
                 flush=True,
             )
+
+    print("[weekly] dedupe...", flush=True)
+    try:
+        dedupe_knowledge(apply=True)
+    except Exception as e:
+        print(f"[weekly] dedupe FAILED ({type(e).__name__}: {e}) — skipping, index still runs", flush=True)
 
     print("[weekly] index...", flush=True)
     subprocess.run([sys.executable, "-m", "src.index"], check=True)
