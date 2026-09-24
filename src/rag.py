@@ -208,17 +208,23 @@ def _inline_citations(text: str, hits: list[dict]) -> tuple[str, list[dict]]:
 
     def repl(m: re.Match) -> str:
         parts = []
-        seen_in_run: set[int] = set()  # model sometimes repeats a number in
-        # one run, e.g. "[3][3]" — same fragment would otherwise render as
-        # two identical "(date)" citations back to back.
+        seen_in_run: set[tuple] = set()  # dedupe by the rendered (lock, link,
+        # date), not by fragment number — retrieval can return two different
+        # hits (different indices in `hits`) that are near-duplicate
+        # knowledge units citing the same source message, e.g. "[3][5]"
+        # where 3 and 5 share a link; a model repeating the SAME number
+        # ("[3][3]") hits this too, since it collapses to the same key.
         for n in _CITE_NUM_RX.findall(m.group(0)):
             i = int(n)
-            if 1 <= i <= len(hits) and i not in seen_in_run:
-                seen_in_run.add(i)
-                used_indices.add(i)
+            if 1 <= i <= len(hits):
                 m_ = hits[i - 1]["meta"]
                 lock = "🔒" if _is_private(m_["chat_username"]) else ""
                 date = _format_date(m_.get("date"))
+                key = (lock, m_["link"], date)
+                if key in seen_in_run:
+                    continue
+                seen_in_run.add(key)
+                used_indices.add(i)
                 parts.append(f"({lock}{m_['link']}{f', {date}' if date else ''})")
         return f" {' '.join(parts)}" if parts else ""
 
