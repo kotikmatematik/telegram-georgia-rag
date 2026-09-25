@@ -15,6 +15,7 @@ from datetime import date, datetime, timezone
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -770,10 +771,24 @@ async def on_question(message: Message) -> None:
     await _answer_query(message, query)
 
 
+# Shown in Telegram's slash-command autocomplete (tap the "/" button). /grant
+# is deliberately left out — it's owner-only, no reason to advertise it to
+# every user who opens the menu (it still works if typed, just checks
+# config.BOT_UNLIMITED_USER_IDS like it always did).
+_BOT_COMMANDS = [
+    BotCommand(command="start", description="Начать сначала"),
+    BotCommand(command="city", description="Город по умолчанию"),
+    BotCommand(command="support", description="Поддержать бота"),
+    BotCommand(command="feedback", description="Оставить отзыв/предложение"),
+    BotCommand(command="id", description="Узнать свой Telegram id"),
+]
+
+
 async def main() -> None:
     if not config.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is not set in .env (get it from @BotFather)")
     bot = Bot(config.BOT_TOKEN)
+    await bot.set_my_commands(_BOT_COMMANDS)
     await dp.start_polling(bot)
 
 
