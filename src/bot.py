@@ -380,16 +380,13 @@ async def on_id_command(message: Message) -> None:
     await message.answer(str(message.from_user.id))
 
 
-@dp.message(Command("feedback"))
-async def on_feedback_command(message: Message) -> None:
-    arg = (message.text or "").split(maxsplit=1)
-    text = arg[1].strip() if len(arg) > 1 else ""
-    if not text:
-        await message.answer(
-            "Использование: /feedback <текст> — напиши прямо в этом же "
-            "сообщении, что понравилось, не понравилось, или чего не хватает."
-        )
-        return
+# In-memory only (not persisted like _USAGE_PATH/_SUPPORTERS_PATH) — losing
+# this on a restart just means whoever was mid-/feedback has to type it
+# again, not worth a file for such a short-lived, low-stakes state.
+_awaiting_feedback: set[int] = set()
+
+
+async def _relay_feedback(message: Message, text: str) -> None:
     user = message.from_user
     handle = f"@{user.username}" if user.username else f"id {user.id}"
     where = "" if message.chat.type == "private" else f" (чат «{message.chat.title}»)"
@@ -399,6 +396,35 @@ async def on_feedback_command(message: Message) -> None:
         except Exception:
             logging.exception("failed to relay feedback from %s to owner %s", user.id, owner_id)
     await message.answer("Спасибо, передала! 🙏")
+
+
+@dp.message(Command("feedback"))
+async def on_feedback_command(message: Message) -> None:
+    arg = (message.text or "").split(maxsplit=1)
+    text = arg[1].strip() if len(arg) > 1 else ""
+    if not text:
+        # No text in the same message — wait for the NEXT one instead of
+        # making the user retype "/feedback ..." in full (see @mois_ilya's
+        # feedback: typing a command and a paragraph in one message is
+        # awkward, especially from a phone keyboard).
+        _awaiting_feedback.add(message.from_user.id)
+        await message.answer(
+            "Напиши следующим сообщением, что понравилось, не понравилось, "
+            "или чего не хватает — перешлю как есть."
+        )
+        return
+    await _relay_feedback(message, text)
+
+
+@dp.message(F.chat.type == "private", lambda m: m.from_user.id in _awaiting_feedback and not (m.text or "").startswith("/"))
+async def on_feedback_followup(message: Message) -> None:
+    _awaiting_feedback.discard(message.from_user.id)
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Не увидела текста — напиши, пожалуйста, словами.")
+        _awaiting_feedback.add(message.from_user.id)
+        return
+    await _relay_feedback(message, text)
 
 
 _SUPPORT_TEXT = (
