@@ -280,7 +280,8 @@ EXAMPLES = (
     "• Как получить водительские права?\n"
     "• Где найти мастера по ремонту в Тбилиси?\n\n"
     f"Бесплатно: {config.BOT_MAX_REQUESTS_PER_DAY} вопросов в день. Голосовые "
-    "и больший лимит — для тех, кто поддержал бота, см. /support."
+    "и больший лимит — для тех, кто поддержал бота, см. /support.\n\n"
+    "Есть предложение или что-то не так с ответом — пиши /feedback."
 )
 
 WELCOME = f"{GREETING}\n\n{EXAMPLES}"  # returning user, no city question involved
@@ -376,6 +377,27 @@ async def on_id_command(message: Message) -> None:
     # Plain, no formatting — meant to be copy-pasted along with a bank
     # transfer receipt so Aleksandra knows which user_id to /grant.
     await message.answer(str(message.from_user.id))
+
+
+@dp.message(Command("feedback"))
+async def on_feedback_command(message: Message) -> None:
+    arg = (message.text or "").split(maxsplit=1)
+    text = arg[1].strip() if len(arg) > 1 else ""
+    if not text:
+        await message.answer(
+            "Использование: /feedback <текст> — напиши прямо в этом же "
+            "сообщении, что понравилось, не понравилось, или чего не хватает."
+        )
+        return
+    user = message.from_user
+    handle = f"@{user.username}" if user.username else f"id {user.id}"
+    where = "" if message.chat.type == "private" else f" (чат «{message.chat.title}»)"
+    for owner_id in config.BOT_UNLIMITED_USER_IDS:
+        try:
+            await message.bot.send_message(owner_id, f"📝 Фидбэк от {handle}{where}:\n\n{text}")
+        except Exception:
+            logging.exception("failed to relay feedback from %s to owner %s", user.id, owner_id)
+    await message.answer("Спасибо, передала! 🙏")
 
 
 _SUPPORT_TEXT = (
