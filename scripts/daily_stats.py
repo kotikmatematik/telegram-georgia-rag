@@ -51,7 +51,7 @@ def build_digest() -> str:
     if by_user:
         lines.append("")
         lines.append("Топ по активности:")
-        for uid, count in by_user.most_common(5):
+        for uid, count in by_user.most_common(10):
             uname = f"@{usernames[uid]}" if usernames.get(uid) else str(uid)
             lines.append(f"  {uname}: {count}")
     if new_supporters:
